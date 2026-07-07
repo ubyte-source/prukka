@@ -1,0 +1,334 @@
+syntax = "proto3";
+
+// The prukka.v1 package is the daemon's control-plane API:
+// session CRUD, stats, lifecycle events and environment checks over gRPC,
+// mirrored onto REST under /api/v1 by grpc-gateway. Breaking changes to this
+// file require a major version bump.
+package prukka.v1;
+
+import "google/api/annotations.proto";
+
+option go_package = "github.com/ubyte-source/prukka/internal/gen/prukka/v1";
+
+// Control is the management surface consumed by the CLI, the tray and the
+// dashboard. Every call carries the per-install token as gRPC metadata; the
+// transport is a UNIX domain socket or Windows named pipe.
+service Control {
+  // CreateSession registers a new session.
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/sessions"
+      body: "session"
+    };
+  }
+
+  // UpdateSession hot-adds and hot-removes target languages on a live
+  // session.
+  rpc UpdateSession(UpdateSessionRequest) returns (UpdateSessionResponse) {
+    option (google.api.http) = {
+      patch: "/api/v1/sessions/{slug}"
+      body: "*"
+    };
+  }
+
+  // DeleteSession removes a session.
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse) {
+    option (google.api.http) = {delete: "/api/v1/sessions/{slug}"};
+  }
+
+  // ListSessions returns all sessions ordered by slug.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
+    option (google.api.http) = {get: "/api/v1/sessions"};
+  }
+
+  // Push starts pushing one language of a session to an external RTMP/SRT
+  // target.
+  rpc Push(PushRequest) returns (PushResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/sessions/{slug}/push"
+      body: "*"
+    };
+  }
+
+  // Stats reports daemon-level counters for the CLI, tray and dashboard.
+  rpc Stats(StatsRequest) returns (StatsResponse) {
+    option (google.api.http) = {get: "/api/v1/stats"};
+  }
+
+  // StreamEvents streams session lifecycle events. The dashboard consumes
+  // the same events as SSE on /api/v1/events, bridged by the daemon.
+  rpc StreamEvents(StreamEventsRequest) returns (stream StreamEventsResponse);
+
+  // Doctor runs environment checks.
+  rpc Doctor(DoctorRequest) returns (DoctorResponse) {
+    option (google.api.http) = {get: "/api/v1/doctor"};
+  }
+
+  // ListLanguages returns the language registry that feeds every dropdown
+  // (core/lang is the single source; no client hardcodes it).
+  rpc ListLanguages(ListLanguagesRequest) returns (ListLanguagesResponse) {
+    option (google.api.http) = {get: "/api/v1/languages"};
+  }
+
+  // ListDevices enumerates this machine's capture and playback devices so
+  // pickers can offer real names instead of raw device:// URLs.
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse) {
+    option (google.api.http) = {get: "/api/v1/devices"};
+  }
+
+  // GetConfig returns the editable daemon configuration.
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse) {
+    option (google.api.http) = {get: "/api/v1/config"};
+  }
+
+  // UpdateConfig applies the edited configuration in one transaction:
+  // validate, persist to the config file, swap live. An invalid edit is
+  // rejected whole with a field-naming message and changes nothing.
+  rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse) {
+    option (google.api.http) = {
+      put: "/api/v1/config"
+      body: "config"
+    };
+  }
+}
+
+// Session carries create input and the sanitized read projection.
+message Session {
+  string slug = 1;
+  // Profile is broadcast or call.
+  string profile = 2;
+  // SourceUrl is write-only input for CreateSession. Read responses and
+  // lifecycle events leave it empty so credentials and local paths cannot
+  // escape the daemon.
+  string source_url = 3;
+  // Langs holds validated BCP-47 target-language tags.
+  repeated string langs = 4;
+  // Deprecated: retained on the v1 wire for binary and JSON compatibility.
+  // Requests with a non-empty map are rejected because the local runtime no
+  // longer supports per-track voices; configure providers.local.tts.voice.
+  map<string, string> voice_map = 5 [deprecated = true];
+  // Flags contains validated media options. dub_langs is a comma-separated
+  // subset of langs; omitted means all, empty means captions only.
+  map<string, string> flags = 6;
+  // Optional distinguishes an omitted value (use the daemon default) from an
+  // explicit zero (no playout delay).
+  reserved 7;
+  reserved "budget_eur_per_hour";
+  optional double delay_seconds = 8;
+  // Status is observed lane state: starting, running, finished or failed.
+  string status = 9;
+  // Error is present only for failed lanes and is bounded and sanitized.
+  string error = 10;
+  // SourceLabel is the sanitized, non-reusable source identity returned by
+  // read responses and lifecycle events.
+  string source_label = 11;
+  // EffectiveDubbedLangs is the subset the configured voice can synthesize.
+  // Read-only; readiness is reported separately by status.
+  repeated string effective_dubbed_langs = 12;
+}
+
+// CreateSessionRequest carries the session to register.
+message CreateSessionRequest {
+  Session session = 1;
+}
+
+// CreateSessionResponse returns the stored session.
+message CreateSessionResponse {
+  Session session = 1;
+}
+
+// UpdateSessionRequest hot-adds and hot-removes target languages.
+message UpdateSessionRequest {
+  string slug = 1;
+  repeated string add_langs = 2;
+  repeated string remove_langs = 3;
+}
+
+// UpdateSessionResponse returns the updated session.
+message UpdateSessionResponse {
+  Session session = 1;
+}
+
+// DeleteSessionRequest names the session to remove.
+message DeleteSessionRequest {
+  string slug = 1;
+}
+
+// DeleteSessionResponse is empty.
+message DeleteSessionResponse {}
+
+// ListSessionsRequest is empty.
+message ListSessionsRequest {}
+
+// ListSessionsResponse returns all sessions ordered by slug.
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+}
+
+// PushRequest names the session, language and target of a push.
+message PushRequest {
+  string slug = 1;
+  string lang = 2;
+  string target_url = 3;
+  // Subs is one of off, vtt or burn.
+  string subs = 4;
+}
+
+// PushResponse is empty.
+message PushResponse {}
+
+// StatsRequest is empty.
+message StatsRequest {}
+
+// StatsResponse carries daemon-level counters.
+message StatsResponse {
+  int64 sessions_active = 1;
+  double uptime_seconds = 2;
+  string version = 3;
+  reserved 4;
+  reserved "cost_eur_per_hour";
+}
+
+// StreamEventsRequest is empty.
+message StreamEventsRequest {}
+
+// StreamEventsResponse is one session lifecycle event.
+message StreamEventsResponse {
+  // Type is one of created, updated, deleted or status.
+  string type = 1;
+  Session session = 2;
+}
+
+// DoctorRequest is empty.
+message DoctorRequest {}
+
+// DoctorResponse aggregates all probe results.
+message DoctorResponse {
+  repeated Check checks = 1;
+}
+
+// Check is one doctor probe result.
+message Check {
+  string name = 1;
+  // Status is one of ok, warn or fail.
+  string status = 2;
+  string detail = 3;
+}
+
+// ListDevicesRequest is empty.
+message ListDevicesRequest {}
+
+// ListDevicesResponse lists the machine's media devices.
+message ListDevicesResponse {
+  repeated Device devices = 1;
+}
+
+// Device is one local capture or playback device.
+message Device {
+  // Url is the ready-to-use session or push target, e.g. "device://audio/1".
+  string url = 1;
+  // Label is the human-readable device name.
+  string label = 2;
+  // Kind is one of audio-in, video-in, audio-out or video-out.
+  string kind = 3;
+  // Virtual marks Prukka's own loopback devices.
+  bool virtual = 4;
+}
+
+// ListLanguagesRequest is empty.
+message ListLanguagesRequest {}
+
+// ListLanguagesResponse returns the registry in stable dropdown order.
+message ListLanguagesResponse {
+  repeated Language languages = 1;
+}
+
+// Language is one selectable registry entry.
+message Language {
+  // Tag is the canonical BCP-47 base tag, e.g. "it".
+  string tag = 1;
+  // Name is the English name, e.g. "Italian".
+  string name = 2;
+  // Native is the native name, e.g. "Italiano".
+  string native = 3;
+  // Label is the dropdown rendering, e.g. "Italiano — it".
+  string label = 4;
+}
+
+// GetConfigRequest is empty.
+message GetConfigRequest {}
+
+// GetConfigResponse carries the editable configuration.
+message GetConfigResponse {
+  Config config = 1;
+}
+
+// UpdateConfigRequest carries the full edited configuration; the daemon
+// validates and applies it whole.
+message UpdateConfigRequest {
+  Config config = 1;
+}
+
+// UpdateConfigResponse returns the applied configuration and names any
+// structural field that only takes effect after a daemon restart.
+message UpdateConfigResponse {
+  Config config = 1;
+  repeated string restart_required = 2;
+}
+
+// Config is the editable settings projection exposed by the control API.
+// Structural, listener, helper-path and dispatch fields remain file-only.
+message Config {
+  ProvidersConfig providers = 1;
+  DefaultsConfig defaults = 2;
+  reserved 3, 4;
+  reserved "budgets", "privacy";
+}
+
+// ProvidersConfig selects and describes the configured local engine stages.
+message ProvidersConfig {
+  reserved 1, 2, 3, 5;
+  reserved "backend", "clone", "openrouter", "cartesia";
+  LocalConfig local = 4;
+  optional string voices = 6;
+}
+
+// LocalConfig describes operator-supplied local engine models and capability.
+message LocalConfig {
+  // Deprecated remote-provider fields remain on the v1 wire for binary and
+  // JSON compatibility. Requests with non-default values are rejected instead
+  // of being accepted without effect; read responses return their defaults.
+  string base_url = 1 [deprecated = true];
+  string stt_base_url = 2 [deprecated = true];
+  string stt_model = 3;
+  string mt_base_url = 4 [deprecated = true];
+  string mt_model = 5 [deprecated = true];
+  double mt_temperature = 6 [deprecated = true];
+  string tts_base_url = 7 [deprecated = true];
+  string tts_model = 8 [deprecated = true];
+  string tts_voice = 9;
+  double timeout_seconds = 10 [deprecated = true];
+  repeated string tts_voices = 11 [deprecated = true];
+  optional string tts_language = 12;
+  TranslationConfig mt = 13;
+}
+
+// TranslationConfig declares the directed MT models in the engine bundle.
+message TranslationConfig {
+  repeated TranslationPair pairs = 1;
+}
+
+// TranslationPair is one concrete source-to-target model capability.
+message TranslationPair {
+  string from = 1;
+  string to = 2;
+}
+
+// DefaultsConfig seeds new sessions.
+message DefaultsConfig {
+  repeated string langs = 1;
+  // Subs is off, vtt or burn.
+  string subs = 2;
+  string bed = 3;
+  double delay_seconds = 4;
+}

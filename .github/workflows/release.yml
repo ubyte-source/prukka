@@ -1,0 +1,665 @@
+# Trusted release pipeline. This workflow is loaded from the default branch by
+# workflow_run; the requested tag is data, never the source of workflow code.
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["Release request"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+
+concurrency:
+  group: release-pipeline
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: verify trusted release request
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+      ref_oid: ${{ steps.verify.outputs.ref_oid }}
+      commit_oid: ${{ steps.verify.outputs.commit_oid }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-request
+          path: request
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Revalidate tag against protected main
+        id: verify
+        run: |
+          set -euo pipefail
+          [[ -f request/release-request.txt ]]
+          [[ $(wc -c < request/release-request.txt) -le 512 ]]
+          mapfile -t request < request/release-request.txt
+          [[ ${#request[@]} -eq 3 ]] || { echo "invalid release request" >&2; exit 1; }
+          tag=${request[0]}
+          requested_ref=${request[1]}
+          requested_commit=${request[2]}
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+          [[ "$tag" =~ $semver ]] || { echo "tag is not canonical SemVer: $tag" >&2; exit 1; }
+          prerelease=${BASH_REMATCH[5]:-}
+          if [[ -n "$prerelease" ]]; then
+            IFS=. read -ra identifiers <<< "$prerelease"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "$identifier" =~ ^[0-9]+$ && ${#identifier} -gt 1 && "$identifier" == 0* ]]; then
+                echo "numeric prerelease identifiers cannot have leading zeroes: $tag" >&2
+                exit 1
+              fi
+            done
+          fi
+          [[ "$requested_ref" =~ ^[0-9a-f]{40}$ && "$requested_commit" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "invalid release object ids" >&2
+            exit 1
+          }
+          git fetch --force --tags origin refs/heads/main:refs/remotes/origin/main
+          ref_oid=$(git rev-parse "refs/tags/$tag")
+          commit_oid=$(git rev-parse "refs/tags/$tag^{commit}")
+          [[ "$ref_oid" == "$requested_ref" && "$commit_oid" == "$requested_commit" ]] || {
+            echo "tag $tag moved after the release request" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$commit_oid" refs/remotes/origin/main || {
+            echo "tag $tag does not point into protected main" >&2
+            exit 1
+          }
+          remote_ref=$(git ls-remote --refs origin "refs/tags/$tag" | awk 'NR == 1 { print $1 }')
+          [[ "$remote_ref" == "$ref_oid" ]] || { echo "remote tag $tag moved" >&2; exit 1; }
+          printf 'tag=%s\nref_oid=%s\ncommit_oid=%s\n' "$tag" "$ref_oid" "$commit_oid" >> "$GITHUB_OUTPUT"
+
+  quality-source:
+    name: quality (lint + proto + vulnerability scan)
+    needs: prepare
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install pinned tools
+        run: make tools
+      - name: Module graph integrity
+        run: |
+          go mod verify
+          go mod tidy -diff
+          (cd engine && go mod verify && go mod tidy -diff)
+      - name: Linter config integrity
+        run: shasum -a 256 -c LINTER.sha256
+      - name: Suppression, test-mapping and runtime-script gates
+        run: |
+          hack/ci/suppression-gate.sh
+          hack/ci/test-mapping-gate.sh
+          make loadgen-test
+      - name: Lint (all target platforms)
+        run: make lint-all
+      - name: Protobuf lint and generated-code sync
+        env:
+          PRUKKA_PROTO_CURRENT_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          (cd proto && ../.tools/bin/buf lint)
+          make proto-breaking
+          make gen
+          changes=$(git status --porcelain=v1 --untracked-files=all -- internal/gen/)
+          [[ -z "$changes" ]] || { printf '%s\n' "$changes" >&2; exit 1; }
+      - name: Vulnerability scan
+        run: |
+          version=$(awk '/^GOVULNCHECK_VERSION/ {print $3}' tools/versions.mk)
+          GOBIN="$PWD/.tools/bin" go install "golang.org/x/vuln/cmd/govulncheck@${version}"
+          .tools/bin/govulncheck ./...
+          (cd engine && ../.tools/bin/govulncheck ./...)
+
+  quality-test:
+    name: quality (test ${{ matrix.os }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Vet
+        run: |
+          go vet ./...
+          (cd engine && go vet ./...)
+      - name: Tests (race detector on)
+        run: |
+          go test -race ./...
+          (cd engine && go test -race ./...)
+      - name: Critical-package coverage gate
+        if: runner.os == 'Linux'
+        run: make cover-gate
+      - name: Frame-path allocation gate
+        if: runner.os == 'Linux'
+        run: make bench
+
+  quality-web:
+    name: quality (dashboard + cross-browser e2e)
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install pinned Node toolchain
+        run: make tools-node
+      - name: Build and audit dashboard
+        run: |
+          make web
+          make web-audit
+          make licenses-check
+          changes=$(git status --porcelain=v1 --untracked-files=all -- internal/webui/dist/)
+          [[ -z "$changes" ]] || { printf '%s\n' "$changes" >&2; exit 1; }
+      - name: Install Playwright browsers
+        run: cd web && PATH="$PWD/../.tools/bin:$PATH" npx --no-install playwright install --with-deps
+      - name: Cross-browser e2e against a real daemon
+        run: make web-e2e
+      - name: Control-plane acceptance demo
+        run: make demo-control
+
+  quality-media:
+    name: quality (local-engine protocol + media acceptance)
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build deterministic local-engine protocol double
+        run: |
+          go build -o "$RUNNER_TEMP/prukka-protocol-engine" ./hack/cmd/protocol-engine
+          printf 'PRUKKA_DEMO_ENGINE=%s\n' "$RUNNER_TEMP/prukka-protocol-engine" >> "$GITHUB_ENV"
+      - name: Install ffmpeg through Prukka's pinned installer
+        run: |
+          make build
+          ffmpeg_path=$(bin/prukka setup --print-path)
+          test -n "$ffmpeg_path"
+          test -x "$ffmpeg_path"
+          test -f "$(dirname "$ffmpeg_path")/ffmpeg-build.json"
+          test -f "$(dirname "$ffmpeg_path")/FFMPEG-NOTICE.txt"
+          printf 'PRUKKA_DEMO_FFMPEG=%s\n' "$ffmpeg_path" >> "$GITHUB_ENV"
+      - name: Captions acceptance
+        run: hack/demo-captions.sh
+      - name: Dubbing acceptance
+        run: hack/demo-dubbing.sh
+      - name: Video HLS and burn-in acceptance
+        run: hack/demo-video.sh
+
+  drivers-macos:
+    name: drivers (macOS HAL x2 + camera)
+    needs: prepare
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Microphone (build + contract harness)
+        run: drivers/macos/microphone/build.sh
+      - name: Speaker (build + contract harness)
+        run: drivers/macos/audio/build.sh
+      - name: Webcam (build + bundle gate)
+        run: drivers/macos/webcam/build.sh
+      - name: Archive deterministic payloads
+        run: |
+          mkdir -p payload
+          go run ./hack/cmd/deterministic-tar -root drivers/macos/microphone/build -output payload/microphone.tar.gz PrukkaMic.driver
+          go run ./hack/cmd/deterministic-tar -root drivers/macos/audio/build -output payload/speaker.tar.gz PrukkaSpeaker.driver
+          go run ./hack/cmd/deterministic-tar -root drivers/macos/webcam/build -output payload/webcam.tar.gz "Prukka Camera.app"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: drivers-darwin
+          path: payload/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  drivers-linux:
+    name: drivers (Linux ALSA x2 + V4L2 camera)
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          persist-credentials: false
+      - name: Kernel headers (generic flavor)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-headers-generic
+          KDIR="$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' | sort -V | tail -n 1)"
+          test -n "$KDIR"
+          echo "KDIR=$KDIR" >> "$GITHUB_ENV"
+      - name: Build modules with warnings as errors
+        run: |
+          make -C drivers/linux/microphone KDIR="$KDIR" KCFLAGS=-Werror
+          make -C drivers/linux/audio KDIR="$KDIR" KCFLAGS=-Werror
+          make -C drivers/linux/webcam KDIR="$KDIR" KCFLAGS=-Werror
+
+  drivers-windows:
+    name: drivers (Windows MF camera + PortCls audio x2)
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Webcam (MSVC, user mode -- no WDK)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          drivers\windows\webcam\build.cmd
+      - name: Audio core models (MSVC /W4 /WX)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cl /nologo /std:c++14 /permissive- /W4 /WX /EHsc drivers\windows\common\ring_test.cpp /Fo"%TEMP%\prukka_ring_test.obj" /Fe"%TEMP%\prukka_ring_test.exe" || exit /b 1
+          "%TEMP%\prukka_ring_test.exe" || exit /b 1
+          cl /nologo /std:c++14 /permissive- /W4 /WX /EHsc drivers\windows\common\position_test.cpp /Fo"%TEMP%\prukka_position_test.obj" /Fe"%TEMP%\prukka_position_test.exe" || exit /b 1
+          "%TEMP%\prukka_position_test.exe" || exit /b 1
+      - name: Audio drivers (WDK msbuild)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          for %%p in (microphone\prukka_mic audio\prukka_speaker) do (
+            msbuild drivers\windows\%%p.vcxproj -p:Configuration=Release -p:Platform=x64 || exit /b 1
+          )
+      - name: Audio driver package isolation (InfVerif /w)
+        shell: pwsh
+        run: |
+          $tool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Tools" -Filter InfVerif.exe -Recurse |
+            Where-Object FullName -Match '\\x64\\' |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $tool) { throw "InfVerif.exe not found in the installed WDK" }
+          & $tool.FullName /w /v drivers\windows\microphone\prukka_mic.inf drivers\windows\audio\prukka_speaker.inf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Archive deterministic webcam payload
+        shell: bash
+        run: |
+          mkdir -p payload/webcam
+          cp drivers/windows/webcam/build/PrukkaWebcam.dll payload/webcam/
+          cp drivers/windows/webcam/build/PrukkaWebcamCtl.exe payload/webcam/
+          go run ./hack/cmd/deterministic-tar -root payload -output payload/webcam.tar.gz webcam
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: drivers-windows
+          path: payload/webcam.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  build-release:
+    name: build release archives (unprivileged)
+    needs:
+      - prepare
+      - quality-source
+      - quality-test
+      - quality-web
+      - quality-media
+      - drivers-macos
+      - drivers-linux
+      - drivers-windows
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install checksum-verified GoReleaser
+        run: make tools-goreleaser
+      - name: Install checksum-verified Syft
+        run: make tools-syft
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: drivers-darwin
+          path: internal/devices/assets/darwin
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: drivers-windows
+          path: internal/devices/assets/windows
+      - name: Bundle deterministic Linux module sources
+        run: |
+          set -euo pipefail
+          mkdir -p internal/devices/assets/linux
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          cp -R drivers/linux "$stage/src"
+          go run ./hack/cmd/deterministic-tar -root "$stage" -output internal/devices/assets/linux/src.tar.gz src
+      - name: Verify immutable release reference
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          REF_OID: ${{ needs.prepare.outputs.ref_oid }}
+          COMMIT_OID: ${{ needs.prepare.outputs.commit_oid }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin refs/heads/main:refs/remotes/origin/main
+          [[ $(git rev-parse "refs/tags/$TAG") == "$REF_OID" ]]
+          [[ $(git rev-parse "refs/tags/$TAG^{commit}") == "$COMMIT_OID" ]]
+          git merge-base --is-ancestor "$COMMIT_OID" refs/remotes/origin/main
+      - name: Assert every driver payload is present
+        run: |
+          for file in darwin/microphone.tar.gz darwin/speaker.tar.gz darwin/webcam.tar.gz \
+                      linux/src.tar.gz windows/webcam.tar.gz; do
+            test -s "internal/devices/assets/$file" || { echo "missing driver payload: $file" >&2; exit 1; }
+          done
+          for file in LICENSE NOTICE.txt drivers/linux/LICENSE README.md \
+                      deploy/uninstall.sh deploy/uninstall.ps1; do
+            test -s "$file" || { echo "missing release input: $file" >&2; exit 1; }
+          done
+      - name: Verify archive reproducibility for the attested driver payloads
+        env:
+          GORELEASER_CURRENT_TAG: ${{ needs.prepare.outputs.tag }}
+        run: hack/ci/release-reproducibility.sh
+      - name: Generate deterministic per-archive SPDX SBOMs
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          COMMIT_OID: ${{ needs.prepare.outputs.commit_oid }}
+        run: |
+          set -euo pipefail
+          syft_version=$(awk '/^SYFT_VERSION/ {print $3}' tools/versions.mk)
+          created_epoch=$(git show -s --format=%ct "$COMMIT_OID")
+          go run ./hack/cmd/release-sbom \
+            -syft-version "$syft_version" \
+            -dist dist \
+            -repo . \
+            -version "$TAG" \
+            -commit "$COMMIT_OID" \
+            -go-version "$GO_VERSION" \
+            -namespace-base "https://github.com/$GITHUB_REPOSITORY" \
+            -created-epoch "$created_epoch"
+      - name: Verify release archive set
+        run: |
+          set -euo pipefail
+          expected=(
+            checksums.txt
+            prukka_darwin_amd64.spdx.json
+            prukka_darwin_amd64.tar.gz
+            prukka_darwin_arm64.spdx.json
+            prukka_darwin_arm64.tar.gz
+            prukka_linux_amd64.spdx.json
+            prukka_linux_amd64.tar.gz
+            prukka_linux_arm64.spdx.json
+            prukka_linux_arm64.tar.gz
+            prukka_windows_amd64.spdx.json
+            prukka_windows_amd64.zip
+          )
+          for file in "${expected[@]}"; do test -s "dist/$file"; done
+          diff -u \
+            <(printf '%s\n' "${expected[@]}" | sort) \
+            <(find dist -maxdepth 1 -type f \( -name 'checksums.txt' -o -name 'prukka_*.spdx.json' \
+              -o -name 'prukka_*.tar.gz' -o -name 'prukka_*.zip' \) \
+              -exec basename {} \; | sort)
+          (cd dist && shasum -a 256 -c checksums.txt)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-dist
+          path: |
+            dist/checksums.txt
+            dist/prukka_*.spdx.json
+            dist/prukka_*.tar.gz
+            dist/prukka_*.zip
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 30
+
+  attest-release:
+    name: attest release archives
+    needs: build-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-dist
+          path: dist
+      - name: Verify archived subjects
+        run: (cd dist && sha256sum -c checksums.txt)
+      - name: Attest build provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: dist/checksums.txt
+      - name: Attest darwin amd64 SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: dist/prukka_darwin_amd64.tar.gz
+          sbom-path: dist/prukka_darwin_amd64.spdx.json
+      - name: Attest darwin arm64 SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: dist/prukka_darwin_arm64.tar.gz
+          sbom-path: dist/prukka_darwin_arm64.spdx.json
+      - name: Attest linux amd64 SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: dist/prukka_linux_amd64.tar.gz
+          sbom-path: dist/prukka_linux_amd64.spdx.json
+      - name: Attest linux arm64 SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: dist/prukka_linux_arm64.tar.gz
+          sbom-path: dist/prukka_linux_arm64.spdx.json
+      - name: Attest windows amd64 SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: dist/prukka_windows_amd64.zip
+          sbom-path: dist/prukka_windows_amd64.spdx.json
+
+  publish:
+    name: publish attested release
+    needs: [prepare, build-release, attest-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+    env:
+      # This job runs without a checkout: gh must be told the repository
+      # instead of probing a git directory that does not exist.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-dist
+          path: dist
+      - name: Verify subjects and immutable tag
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          REF_OID: ${{ needs.prepare.outputs.ref_oid }}
+          COMMIT_OID: ${{ needs.prepare.outputs.commit_oid }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c checksums.txt)
+          refs=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$TAG" "refs/tags/$TAG^{}")
+          remote_ref=$(awk -v name="refs/tags/$TAG" '$2 == name { print $1 }' <<< "$refs")
+          remote_commit=$(awk -v name="refs/tags/$TAG^{}" '$2 == name { print $1 }' <<< "$refs")
+          [[ -n "$remote_commit" ]] || remote_commit=$remote_ref
+          [[ "$remote_ref" == "$REF_OID" && "$remote_commit" == "$COMMIT_OID" ]] || {
+            echo "tag $TAG moved before publication" >&2
+            exit 1
+          }
+      - name: Stage a managed draft
+        id: stage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | [.id, .draft] | @tsv" | \
+            awk 'NR == 1 { first = $0 } END { print first }')
+          if [[ -n "$existing" ]]; then
+            IFS=$'\t' read -r release_id draft <<< "$existing"
+            body=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .body)
+            grep -Fxq '<!-- prukka-managed-release -->' <<< "$body" || {
+              echo "refusing to alter an unmanaged release for $TAG" >&2
+              exit 1
+            }
+            if [[ "$draft" == false ]]; then
+              expected=(
+                checksums.txt
+                prukka_darwin_amd64.spdx.json
+                prukka_darwin_amd64.tar.gz
+                prukka_darwin_arm64.spdx.json
+                prukka_darwin_arm64.tar.gz
+                prukka_linux_amd64.spdx.json
+                prukka_linux_amd64.tar.gz
+                prukka_linux_arm64.spdx.json
+                prukka_linux_arm64.tar.gz
+                prukka_windows_amd64.spdx.json
+                prukka_windows_amd64.zip
+              )
+              mapfile -t actual < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+                --jq '.[].name' | sort)
+              mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
+              diff -u <(printf '%s\n' "${wanted[@]}") <(printf '%s\n' "${actual[@]}")
+              verify_dir=$(mktemp -d)
+              trap 'rm -rf "$verify_dir"' EXIT
+              while IFS=$'\t' read -r asset_id asset_name; do
+                gh api -H 'Accept: application/octet-stream' \
+                  "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$verify_dir/$asset_name"
+                cmp "dist/$asset_name" "$verify_dir/$asset_name"
+              done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+                --jq '.[] | [.id, .name] | @tsv')
+              (cd "$verify_dir" && sha256sum -c checksums.txt)
+              echo 'already_published=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+          fi
+          printf '%s\n' '<!-- prukka-managed-release -->' > release-notes-prefix.md
+          args=(--verify-tag --draft --title "Prukka $TAG" --generate-notes --notes-file release-notes-prefix.md)
+          [[ "$TAG" == *-* ]] && args+=(--prerelease)
+          gh release create "$TAG" "${args[@]}"
+          echo 'already_published=false' >> "$GITHUB_OUTPUT"
+      - name: Upload and verify every release asset
+        if: steps.stage.outputs.already_published != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          expected=(
+            checksums.txt
+            prukka_darwin_amd64.spdx.json
+            prukka_darwin_amd64.tar.gz
+            prukka_darwin_arm64.spdx.json
+            prukka_darwin_arm64.tar.gz
+            prukka_linux_amd64.spdx.json
+            prukka_linux_amd64.tar.gz
+            prukka_linux_arm64.spdx.json
+            prukka_linux_arm64.tar.gz
+            prukka_windows_amd64.spdx.json
+            prukka_windows_amd64.zip
+          )
+          paths=()
+          for file in "${expected[@]}"; do
+            test -s "dist/$file"
+            paths+=("dist/$file")
+          done
+          gh release upload "$TAG" "${paths[@]}"
+          # The releases list lags its own writes: poll until the fresh
+          # draft is visible instead of failing on a stale replica.
+          release_id=''
+          for _ in $(seq 1 30); do
+            release_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"$TAG\" and .draft == true) | .id" | \
+              awk 'NR == 1 { first = $0 } END { print first }')
+            [[ -n "$release_id" ]] && break
+            sleep 2
+          done
+          [[ -n "$release_id" ]] || { echo "draft release for $TAG is not visible" >&2; exit 1; }
+          mapfile -t actual < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+            --jq '.[].name' | sort)
+          mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
+          diff -u <(printf '%s\n' "${wanted[@]}") <(printf '%s\n' "${actual[@]}")
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf "$verify_dir"' EXIT
+          while IFS=$'\t' read -r asset_id asset_name; do
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$verify_dir/$asset_name"
+            cmp "dist/$asset_name" "$verify_dir/$asset_name"
+          done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+            --jq '.[] | [.id, .name] | @tsv')
+          (cd "$verify_dir" && sha256sum -c checksums.txt)
+      - name: Publish verified draft
+        if: steps.stage.outputs.already_published != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          REF_OID: ${{ needs.prepare.outputs.ref_oid }}
+          COMMIT_OID: ${{ needs.prepare.outputs.commit_oid }}
+        run: |
+          set -euo pipefail
+          refs=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$TAG" "refs/tags/$TAG^{}")
+          remote_ref=$(awk -v name="refs/tags/$TAG" '$2 == name { print $1 }' <<< "$refs")
+          remote_commit=$(awk -v name="refs/tags/$TAG^{}" '$2 == name { print $1 }' <<< "$refs")
+          [[ -n "$remote_commit" ]] || remote_commit=$remote_ref
+          [[ "$remote_ref" == "$REF_OID" && "$remote_commit" == "$COMMIT_OID" ]]
+          gh release edit "$TAG" --draft=false
+          [[ $(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .draft) == false ]]

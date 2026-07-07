@@ -1,0 +1,60 @@
+package lang
+
+// registry is the canonical language table, ordered by English name;
+// immutable, callers only receive copies.
+var registry = []Language{
+	{Tag: "ar", Name: "Arabic", Native: "العربية"},
+	{Tag: "bg", Name: "Bulgarian", Native: "Български"},
+	{Tag: "ca", Name: "Catalan", Native: "Català"},
+	{Tag: "zh", Name: "Chinese", Native: "中文"},
+	{Tag: "hr", Name: "Croatian", Native: "Hrvatski"},
+	{Tag: "cs", Name: "Czech", Native: "Čeština"},
+	{Tag: "da", Name: "Danish", Native: "Dansk"},
+	{Tag: "nl", Name: "Dutch", Native: "Nederlands"},
+	{Tag: "en", Name: "English", Native: "English"},
+	{Tag: "et", Name: "Estonian", Native: "Eesti"},
+	{Tag: "fi", Name: "Finnish", Native: "Suomi"},
+	{Tag: "fr", Name: "French", Native: "Français"},
+	{Tag: "de", Name: "German", Native: "Deutsch"},
+	{Tag: "el", Name: "Greek", Native: "Ελληνικά"},
+	{Tag: "he", Name: "Hebrew", Native: "עברית"},
+	{Tag: "hi", Name: "Hindi", Native: "हिन्दी"},
+	{Tag: "hu", Name: "Hungarian", Native: "Magyar"},
+	{Tag: "id", Name: "Indonesian", Native: "Bahasa Indonesia"},
+	{Tag: "it", Name: "Italian", Native: "Italiano"},
+	{Tag: "ja", Name: "Japanese", Native: "日本語"},
+	{Tag: "ko", Name: "Korean", Native: "한국어"},
+	{Tag: "lv", Name: "Latvian", Native: "Latviešu"},
+	{Tag: "lt", Name: "Lithuanian", Native: "Lietuvių"},
+	{Tag: "ms", Name: "Malay", Native: "Bahasa Melayu"},
+	{Tag: "no", Name: "Norwegian", Native: "Norsk"},
+	{Tag: "pl", Name: "Polish", Native: "Polski"},
+	{Tag: "pt", Name: "Portuguese", Native: "Português"},
+	{Tag: "ro", Name: "Romanian", Native: "Română"},
+	{Tag: "ru", Name: "Russian", Native: "Русский"},
+	{Tag: "sr", Name: "Serbian", Native: "Српски"},
+	{Tag: "sk", Name: "Slovak", Native: "Slovenčina"},
+	{Tag: "sl", Name: "Slovenian", Native: "Slovenščina"},
+	{Tag: "es", Name: "Spanish", Native: "Español"},
+	{Tag: "sv", Name: "Swedish", Native: "Svenska"},
+	{Tag: "th", Name: "Thai", Native: "ไทย"},
+	{Tag: "tr", Name: "Turkish", Native: "Türkçe"},
+	{Tag: "uk", Name: "Ukrainian", Native: "Українська"},
+	{Tag: "vi", Name: "Vietnamese", Native: "Tiếng Việt"},
+}
+
+// confusions maps frequent non-language inputs (usually country codes) to
+// the languages users most likely meant.
+var confusions = map[string][]Suggestion{
+	"at": {{Tag: "de-AT", Name: "Austrian German"}},
+	"br": {{Tag: "pt-BR", Name: "Brazilian Portuguese"}},
+	"ch": {{Tag: "zh", Name: "Chinese"}, {Tag: "de-CH", Name: "Swiss German"}},
+	"cn": {{Tag: "zh", Name: "Chinese"}},
+	"cz": {{Tag: "cs", Name: "Czech"}},
+	"dk": {{Tag: "da", Name: "Danish"}},
+	"gr": {{Tag: "el", Name: "Greek"}},
+	"jp": {{Tag: "ja", Name: "Japanese"}},
+	"kr": {{Tag: "ko", Name: "Korean"}},
+	"ua": {{Tag: "uk", Name: "Ukrainian"}},
+	"us": {{Tag: "en-US", Name: "American English"}},
+}

@@ -1,0 +1,203 @@
+# CI matrix and quality gates. Every gate is blocking. Actions
+# are pinned by commit SHA (supply chain).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+
+jobs:
+  # The maintainer lint gate: config integrity, suppression gate and
+  # the pinned golangci-lint run. It runs on macOS because the darwin
+  # typecheck needs cgo/AppKit; linux and windows cross-typecheck as pure Go.
+  lint:
+    name: lint (maintainer gate)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - name: Linter config integrity (.golangci.yml ↔ LINTER.sha256)
+        run: shasum -a 256 -c LINTER.sha256
+      - name: Suppression gate (allowlisted nolint, no #nosec)
+        run: hack/ci/suppression-gate.sh
+      - name: Test-mapping gate (every source file carries its own tests)
+        run: hack/ci/test-mapping-gate.sh
+      - name: Demo ffmpeg stays outside managed state
+        run: hack/ci/demo-ffmpeg-path-gate.sh
+      - name: Load, PGO and process-cleanup fixtures
+        run: make loadgen-test
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Module graph integrity
+        run: |
+          go mod verify
+          go mod tidy -diff
+          (cd engine && go mod verify && go mod tidy -diff)
+      - name: Install pinned tools
+        run: make tools
+      - name: Lint (all target platforms)
+        run: make lint-all
+
+  # Generated protobuf code must match the committed sources.
+  proto:
+    name: proto (buf lint + gen sync)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install pinned tools
+        run: make tools
+      - name: buf lint
+        run: cd proto && ../.tools/bin/buf lint
+      - name: Released API compatibility
+        run: make proto-breaking
+      - name: Generated code in sync
+        run: |
+          make gen
+          changes=$(git status --porcelain=v1 --untracked-files=all -- internal/gen/)
+          [[ -z "$changes" ]] || { printf '%s\n' "$changes" >&2; exit 1; }
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: go vet
+        run: |
+          go vet ./...
+          (cd engine && go vet ./...)
+      - name: Tests (race detector on)
+        run: |
+          go test -race ./...
+          (cd engine && go test -race ./...)
+      - name: Critical-package coverage gate
+        if: runner.os == 'Linux'
+        run: make cover-gate
+      - name: Bench gate (0 allocs/op on the frame path)
+        if: runner.os == 'Linux'
+        run: make bench
+
+  # amd64 + arm64 artifacts for every OS. Darwin builds run on the
+  # macOS runner because the tray needs cgo/AppKit; linux and windows are
+  # pure Go and cross-compile from Linux.
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, runner: ubuntu-latest, cgo: "0" }
+          - { goos: linux, goarch: arm64, runner: ubuntu-latest, cgo: "0" }
+          - { goos: windows, goarch: amd64, runner: ubuntu-latest, cgo: "0" }
+          - { goos: windows, goarch: arm64, runner: ubuntu-latest, cgo: "0" }
+          - { goos: darwin, goarch: amd64, runner: macos-latest, cgo: "1" }
+          - { goos: darwin, goarch: arm64, runner: macos-latest, cgo: "1" }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: go build ./...
+
+  govulncheck:
+    name: govulncheck (supply chain)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Scan
+        run: |
+          version=$(grep '^GOVULNCHECK_VERSION' tools/versions.mk | awk '{print $3}')
+          go install "golang.org/x/vuln/cmd/govulncheck@${version}"
+          "$(go env GOPATH)/bin/govulncheck" ./...
+          (cd engine && "$(go env GOPATH)/bin/govulncheck" ./...)
+
+  web:
+    name: web (dashboard build + cross-browser e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install pinned Node toolchain
+        run: make tools-node
+      - name: Build the dashboard from source
+        run: make web
+      - name: Audit locked dashboard dependencies
+        run: make web-audit
+      - name: Third-party notices match locked dependencies
+        run: make licenses-check
+      - name: Embedded dist matches the source (rebuild is deterministic)
+        run: |
+          changes=$(git status --porcelain=v1 --untracked-files=all -- internal/webui/dist/)
+          [[ -z "$changes" ]] || { printf '%s\n' "$changes" >&2; exit 1; }
+      - name: Install Playwright browsers (chromium, firefox, webkit)
+        run: cd web && PATH="$PWD/../.tools/bin:$PATH" npx --no-install playwright install --with-deps
+      - name: Cross-browser e2e against a real daemon
+        run: make web-e2e
+
+  e2e:
+    name: e2e (demos)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build deterministic local-engine protocol double
+        run: |
+          go build -o "$RUNNER_TEMP/prukka-protocol-engine" ./hack/cmd/protocol-engine
+          printf 'PRUKKA_DEMO_ENGINE=%s\n' "$RUNNER_TEMP/prukka-protocol-engine" >> "$GITHUB_ENV"
+      - name: Control-plane demo
+        run: make demo-control
+      - name: ffmpeg through Prukka's own pinned installer
+        run: |
+          make build
+          ffmpeg_path=$(bin/prukka setup --print-path)
+          test -n "$ffmpeg_path"
+          test -x "$ffmpeg_path"
+          test -f "$(dirname "$ffmpeg_path")/ffmpeg-build.json"
+          test -f "$(dirname "$ffmpeg_path")/FFMPEG-NOTICE.txt"
+          printf 'PRUKKA_DEMO_FFMPEG=%s\n' "$ffmpeg_path" >> "$GITHUB_ENV"
+      - name: Captions protocol acceptance
+        run: hack/demo-captions.sh
+      - name: Dubbing protocol acceptance
+        run: hack/demo-dubbing.sh
+      - name: Video HLS and burn-in acceptance
+        run: hack/demo-video.sh

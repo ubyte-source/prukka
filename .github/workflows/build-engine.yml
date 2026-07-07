@@ -1,0 +1,51 @@
+# Manual experiment: build the macOS all-local engine (whisper.cpp STT,
+# CTranslate2/Opus-MT and Piper TTS) in an ephemeral runner. The bundle is not
+# uploaded because its complete license inventory and input verification are
+# still pending. This workflow is not a release or installation path.
+#
+# The build downloads directly from upstream. Only the Opus-MT zip is currently
+# checksum-verified; see engine/README.md for the remaining supply-chain gaps.
+# It is toolchain-heavy and started by hand. Linux and Windows remain future
+# work once engine/build.sh has their library and archive branches.
+name: build-engine
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+
+jobs:
+  macos:
+    name: macOS engine bundle (whisper + CTranslate2/Opus-MT + Piper)
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Require the declared amd64 build host
+        run: test "$(uname -m)" = x86_64
+      - name: Test the engine protocol and DSP helpers
+        run: cd engine && go test -race ./...
+      - name: Build the experimental engine bundle
+        run: engine/build.sh "${RUNNER_TEMP}/prukka-engine"
+      - name: Validate deterministic archive metadata locally
+        run: |
+          set -euo pipefail
+          go run ./hack/cmd/deterministic-tar \
+            -root "${RUNNER_TEMP}" \
+            -output "${RUNNER_TEMP}/prukka-engine-darwin-amd64.tar.gz" \
+            prukka-engine
+          (
+            cd "${RUNNER_TEMP}"
+            shasum -a 256 prukka-engine-darwin-amd64.tar.gz \
+              > prukka-engine-darwin-amd64.tar.gz.sha256
+            shasum -a 256 -c prukka-engine-darwin-amd64.tar.gz.sha256
+          )

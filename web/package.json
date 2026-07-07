@@ -1,0 +1,26 @@
+{
+  "name": "prukka-dashboard",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Prukka control dashboard — builds to static files embedded in the Go binary.",
+  "allowScripts": {
+    "fsevents": false
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings && node --test unit/*.test.mjs",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "@tailwindcss/vite": "^4.1.0",
+    "svelte": "^5.16.0",
+    "svelte-check": "^4.7.2",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.4"
+  }
+}

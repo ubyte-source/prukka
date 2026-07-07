@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.prukka.daemon</string>
+    <key>CFBundleName</key>
+    <string>prukka</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Prukka captures the microphone you selected to dub your voice in real time. Audio is processed on this computer and sent only to the AI provider you configured.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Prukka captures the camera you selected as a video source for live-subtitled output. Video is processed on this computer.</string>
+</dict>
+</plist>

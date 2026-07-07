@@ -1,0 +1,19 @@
+# Code generation for the control-plane API: Go types, gRPC stubs and the
+# grpc-gateway REST reverse proxy. Run via `make gen`; output lands in /internal/gen
+# and is excluded from lint as generated code.
+version: v2
+clean: true
+inputs:
+  - directory: .
+    paths:
+      - prukka
+plugins:
+  - local: protoc-gen-go
+    out: ../internal/gen
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: ../internal/gen
+    opt: paths=source_relative
+  - local: protoc-gen-grpc-gateway
+    out: ../internal/gen
+    opt: paths=source_relative
