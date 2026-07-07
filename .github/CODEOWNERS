@@ -1,0 +1,9 @@
+# Maintainer-owned quality gates (CONTRIBUTING.md, Engineering
+# Constitution, "The linter contract").
+# The linter configuration, its integrity anchor and the pinned tool versions
+# may only change with maintainer review. The handle below is the repository
+# owner (personal account); switch it to a maintainer team if the project
+# ever moves into an organization.
+/.golangci.yml   @ubyte-source
+/LINTER.sha256   @ubyte-source
+/tools/          @ubyte-source

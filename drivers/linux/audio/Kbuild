@@ -1,0 +1,3 @@
+obj-m := snd_prukka_speaker.o
+snd_prukka_speaker-y := main.o
+ccflags-y := -I$(src)

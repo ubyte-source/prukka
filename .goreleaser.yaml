@@ -1,0 +1,55 @@
+# Release pipeline: `git tag vX.Y.Z && git push --tags` and the
+# release workflow publishes archives whose names match deploy/install.sh
+# and install.ps1. Signing/notarization jobs join once the maintainer adds
+# the certificates.
+version: 2
+
+project_name: prukka
+
+builds:
+  - id: prukka
+    main: ./cmd/prukka
+    binary: prukka
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos: [linux, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+  - id: prukka-darwin
+    main: ./cmd/prukka
+    binary: prukka
+    # The tray needs cgo/AppKit on macOS; release runs on a macOS runner.
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+    goos: [darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+
+archives:
+  - id: default
+    ids: [prukka, prukka-darwin]
+    name_template: "prukka_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+
+release:
+  draft: false
+  prerelease: auto

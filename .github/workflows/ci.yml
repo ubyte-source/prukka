@@ -1,0 +1,183 @@
+# CI matrix and quality gates. Every gate is blocking. Actions
+# are pinned by commit SHA (supply chain).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.4"
+
+jobs:
+  # The maintainer lint gate: config integrity, suppression gate and
+  # the pinned golangci-lint run.
+  lint:
+    name: lint (maintainer gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - name: Linter config integrity (.golangci.yml ↔ LINTER.sha256)
+        run: shasum -a 256 -c LINTER.sha256
+      - name: Suppression gate (no nolint/#nosec, pinned linter untouched)
+        if: github.event_name == 'pull_request'
+        run: hack/ci/suppression-gate.sh "origin/${{ github.base_ref }}"
+      - name: Test-mapping gate (every source file carries its own tests)
+        run: hack/ci/test-mapping-gate.sh
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install pinned tools
+        run: make tools
+      - name: Lint (all target platforms)
+        run: |
+          make lint
+          GOOS=linux .tools/bin/golangci-lint run ./...
+          GOOS=darwin .tools/bin/golangci-lint run ./...
+          GOOS=windows .tools/bin/golangci-lint run ./...
+
+  # Generated protobuf code must match the committed sources.
+  proto:
+    name: proto (buf lint + gen sync)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install pinned tools
+        run: make tools
+      - name: buf lint
+        run: cd proto && ../.tools/bin/buf lint
+      - name: Generated code in sync
+        run: |
+          make gen
+          git diff --exit-code internal/gen/
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: go vet
+        run: go vet ./...
+      - name: Tests (race detector on)
+        run: go test -race ./...
+      - name: Bench gate (0 allocs/op on the frame path)
+        if: runner.os == 'Linux'
+        run: make bench
+
+  # amd64 + arm64 artifacts for every OS. Darwin builds run on the
+  # macOS runner because the tray needs cgo/AppKit; linux and windows are
+  # pure Go and cross-compile from Linux.
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, runner: ubuntu-latest, cgo: "0" }
+          - { goos: linux, goarch: arm64, runner: ubuntu-latest, cgo: "0" }
+          - { goos: windows, goarch: amd64, runner: ubuntu-latest, cgo: "0" }
+          - { goos: windows, goarch: arm64, runner: ubuntu-latest, cgo: "0" }
+          - { goos: darwin, goarch: amd64, runner: macos-latest, cgo: "1" }
+          - { goos: darwin, goarch: arm64, runner: macos-latest, cgo: "1" }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: go build ./...
+
+  govulncheck:
+    name: govulncheck (supply chain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Scan
+        run: |
+          version=$(grep '^GOVULNCHECK_VERSION' tools/versions.mk | awk '{print $3}')
+          go install "golang.org/x/vuln/cmd/govulncheck@${version}"
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  web:
+    name: web (dashboard build + cross-browser e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install pinned Node toolchain
+        run: make tools-node
+      - name: Build the dashboard from source
+        run: make web
+      - name: Embedded dist matches the source (rebuild is deterministic)
+        run: git diff --exit-code internal/webui/dist/
+      - name: Install Playwright browsers (chromium, firefox, webkit)
+        run: cd web && PATH="$PWD/../.tools/bin:$PATH" npx playwright install --with-deps
+      - name: Cross-browser e2e against a real daemon
+        run: make web-e2e
+
+  e2e:
+    name: e2e (demos)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Control-plane demo
+        run: make demo-control
+      - name: Encoder-side ffmpeg for the RTMP demo phase
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - name: Captions demo (skips without OPENROUTER_API_KEY secret)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: make demo-captions
+      - name: Dubbing demo (skips without OPENROUTER_API_KEY secret)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: make demo-dubbing
+      - name: Video HLS demo (skips without OPENROUTER_API_KEY secret)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: make demo-video
+
+  # Auto-voice needs macOS `say` for its two-speaker fixture.
+  e2e-autovoice:
+    name: e2e (auto-voice, macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: ffmpeg for the fixture and the dub path
+        run: brew install ffmpeg
+      - name: Auto-voice demo (skips without OPENROUTER_API_KEY secret)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: make demo-autovoice

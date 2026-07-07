@@ -1,0 +1,46 @@
+; Prukka Speaker — virtual audio driver (PortCls). Call apps select it
+; the engine captures for interpretation (call ear).
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = MEDIA
+ClassGuid   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider    = %Prukka%
+CatalogFile = prukka_speaker.cat
+DriverVer   = 01/01/2026,1.0.0.0
+PnpLockDown = 1
+
+[Manufacturer]
+%Prukka% = Prukka,NTamd64
+
+[Prukka.NTamd64]
+%Prukka.Speaker.DeviceDesc% = Prukka_Install,Root\PrukkaSpeaker
+
+[Prukka_Install.NT]
+CopyFiles = Prukka.CopyFiles
+
+[Prukka.CopyFiles]
+prukka_audio.sys
+
+[Prukka_Install.NT.Services]
+AddService = PrukkaSpeaker,0x00000002,Prukka_Service
+
+[Prukka_Service]
+DisplayName   = %Prukka.Speaker.DeviceDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %12%\prukka_audio.sys
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+prukka_audio.sys = 1
+
+[DestinationDirs]
+Prukka.CopyFiles = 12
+
+[Strings]
+Prukka              = "Prukka"
+DiskName            = "Prukka Speaker Installation Disk"
+Prukka.Speaker.DeviceDesc = "Prukka Speaker"

@@ -1,0 +1,38 @@
+# Build outputs.
+/bin/
+/dist/
+
+# Repo-local pinned tools (installed by `make tools`).
+/.tools/
+
+# Test and coverage artifacts.
+*.test
+coverage.out
+
+# Local development state (created by `make dev` / demo scripts).
+/tmp/
+
+# Frontend toolchain (build-time only; see internal/webui/web.go).
+node_modules/
+web/test-results/
+web/playwright-report/
+
+# Editor noise.
+.DS_Store
+drivers/macos/webcam/build/
+drivers/macos/microphone/build/
+drivers/macos/audio/build/
+drivers/windows/webcam/build/
+drivers/windows/*/x64/
+drivers/windows/*/*.sys
+drivers/windows/*/*.obj
+drivers/linux/*/*.ko
+drivers/linux/*/*.o
+drivers/linux/*/*.mod*
+drivers/linux/*/.*.cmd
+drivers/linux/*/modules.order
+drivers/linux/*/Module.symvers
+/prukka
+
+# Go fuzzing corpus is machine-generated.
+testdata/fuzz/

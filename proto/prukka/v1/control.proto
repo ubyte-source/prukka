@@ -1,0 +1,330 @@
+syntax = "proto3";
+
+// The prukka.v1 package is the daemon's control-plane API:
+// session CRUD, stats, lifecycle events and environment checks over gRPC,
+// mirrored onto REST under /api/v1 by grpc-gateway. Breaking changes to this
+// file require a major version bump.
+package prukka.v1;
+
+import "google/api/annotations.proto";
+
+option go_package = "github.com/ubyte-source/prukka/internal/gen/prukka/v1";
+
+// Control is the management surface consumed by the CLI, the tray and the
+// dashboard. Every call carries the per-install token as gRPC metadata; the
+// transport is a UNIX domain socket or Windows named pipe.
+service Control {
+  // CreateSession registers a new session.
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/sessions"
+      body: "session"
+    };
+  }
+
+  // UpdateSession hot-adds and hot-removes target languages on a live
+  // session.
+  rpc UpdateSession(UpdateSessionRequest) returns (UpdateSessionResponse) {
+    option (google.api.http) = {
+      patch: "/api/v1/sessions/{slug}"
+      body: "*"
+    };
+  }
+
+  // DeleteSession removes a session.
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse) {
+    option (google.api.http) = {delete: "/api/v1/sessions/{slug}"};
+  }
+
+  // ListSessions returns all sessions ordered by slug.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
+    option (google.api.http) = {get: "/api/v1/sessions"};
+  }
+
+  // Push starts pushing one language of a session to an external RTMP/SRT
+  // target.
+  rpc Push(PushRequest) returns (PushResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/sessions/{slug}/push"
+      body: "*"
+    };
+  }
+
+  // Stats reports daemon-level counters for the CLI, tray and dashboard.
+  rpc Stats(StatsRequest) returns (StatsResponse) {
+    option (google.api.http) = {get: "/api/v1/stats"};
+  }
+
+  // StreamEvents streams session lifecycle events. The dashboard consumes
+  // the same events as SSE on /api/v1/events, bridged by the daemon.
+  rpc StreamEvents(StreamEventsRequest) returns (stream StreamEventsResponse);
+
+  // Doctor runs environment checks.
+  rpc Doctor(DoctorRequest) returns (DoctorResponse) {
+    option (google.api.http) = {get: "/api/v1/doctor"};
+  }
+
+  // ListLanguages returns the language registry that feeds every dropdown
+  // (core/lang is the single source; no client hardcodes it).
+  rpc ListLanguages(ListLanguagesRequest) returns (ListLanguagesResponse) {
+    option (google.api.http) = {get: "/api/v1/languages"};
+  }
+
+  // GetConfig returns the editable daemon configuration. Secrets never
+  // appear: key fields report only whether a key is configured.
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse) {
+    option (google.api.http) = {get: "/api/v1/config"};
+  }
+
+  // UpdateConfig applies the edited configuration in one transaction:
+  // validate, persist to the config file, swap live. An invalid edit is
+  // rejected whole with a field-naming message and changes nothing.
+  rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse) {
+    option (google.api.http) = {
+      put: "/api/v1/config"
+      body: "config"
+    };
+  }
+
+  // SetKey stores one provider API key in the OS keychain. The key is
+  // write-only: it never returns through any RPC.
+  rpc SetKey(SetKeyRequest) returns (SetKeyResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/keys"
+      body: "*"
+    };
+  }
+}
+
+// Session mirrors core/session.Session.
+message Session {
+  string slug = 1;
+  // Profile is one of broadcast, call or agent.
+  string profile = 2;
+  string source_url = 3;
+  // Langs holds validated BCP-47 target-language tags.
+  repeated string langs = 4;
+  // VoiceMap assigns a TTS voice id to each Track identity.
+  map<string, string> voice_map = 5;
+  map<string, string> flags = 6;
+  double budget_eur_per_hour = 7;
+  double delay_seconds = 8;
+}
+
+// CreateSessionRequest carries the session to register.
+message CreateSessionRequest {
+  Session session = 1;
+}
+
+// CreateSessionResponse returns the stored session.
+message CreateSessionResponse {
+  Session session = 1;
+}
+
+// UpdateSessionRequest hot-adds and hot-removes target languages.
+message UpdateSessionRequest {
+  string slug = 1;
+  repeated string add_langs = 2;
+  repeated string remove_langs = 3;
+}
+
+// UpdateSessionResponse returns the updated session.
+message UpdateSessionResponse {
+  Session session = 1;
+}
+
+// DeleteSessionRequest names the session to remove.
+message DeleteSessionRequest {
+  string slug = 1;
+}
+
+// DeleteSessionResponse is empty.
+message DeleteSessionResponse {}
+
+// ListSessionsRequest is empty.
+message ListSessionsRequest {}
+
+// ListSessionsResponse returns all sessions ordered by slug.
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+}
+
+// PushRequest names the session, language and target of a push.
+message PushRequest {
+  string slug = 1;
+  string lang = 2;
+  string target_url = 3;
+  // Subs is one of off, vtt or burn.
+  string subs = 4;
+}
+
+// PushResponse is empty.
+message PushResponse {}
+
+// StatsRequest is empty.
+message StatsRequest {}
+
+// StatsResponse carries daemon-level counters.
+message StatsResponse {
+  int64 sessions_active = 1;
+  double uptime_seconds = 2;
+  string version = 3;
+  // CostEurPerHour is the session's current spend rate in euros.
+  double cost_eur_per_hour = 4;
+}
+
+// StreamEventsRequest is empty.
+message StreamEventsRequest {}
+
+// StreamEventsResponse is one session lifecycle event.
+message StreamEventsResponse {
+  // Type is one of created, updated or deleted.
+  string type = 1;
+  Session session = 2;
+}
+
+// DoctorRequest is empty.
+message DoctorRequest {}
+
+// DoctorResponse aggregates all probe results.
+message DoctorResponse {
+  repeated Check checks = 1;
+}
+
+// Check is one doctor probe result.
+message Check {
+  string name = 1;
+  // Status is one of ok, warn or fail.
+  string status = 2;
+  string detail = 3;
+}
+
+// ListLanguagesRequest is empty.
+message ListLanguagesRequest {}
+
+// ListLanguagesResponse returns the registry in stable dropdown order.
+message ListLanguagesResponse {
+  repeated Language languages = 1;
+}
+
+// Language is one selectable registry entry.
+message Language {
+  // Tag is the canonical BCP-47 base tag, e.g. "it".
+  string tag = 1;
+  // Name is the English name, e.g. "Italian".
+  string name = 2;
+  // Native is the native name, e.g. "Italiano".
+  string native = 3;
+  // Label is the dropdown rendering, e.g. "Italiano — it".
+  string label = 4;
+}
+
+// GetConfigRequest is empty.
+message GetConfigRequest {}
+
+// GetConfigResponse carries the editable configuration.
+message GetConfigResponse {
+  Config config = 1;
+}
+
+// UpdateConfigRequest carries the full edited configuration; the daemon
+// validates and applies it whole.
+message UpdateConfigRequest {
+  Config config = 1;
+}
+
+// UpdateConfigResponse returns the applied configuration and names any
+// structural field that only takes effect after a daemon restart.
+message UpdateConfigResponse {
+  Config config = 1;
+  repeated string restart_required = 2;
+}
+
+// SetKeyRequest stores one provider key. Provider is a known provider name
+// (openrouter, cartesia); the key lands in the OS keychain, never in a file.
+message SetKeyRequest {
+  string provider = 1;
+  string key = 2;
+}
+
+// SetKeyResponse is empty.
+message SetKeyResponse {}
+
+// Config is the editable daemon configuration — the same schema as
+// config.yaml, minus listener addresses (structural, file-only) and minus
+// secrets (managed through SetKey, reported as *_key_set booleans).
+message Config {
+  ProvidersConfig providers = 1;
+  DefaultsConfig defaults = 2;
+  BudgetsConfig budgets = 3;
+  PrivacyConfig privacy = 4;
+}
+
+// ProvidersConfig selects and tunes the AI providers.
+message ProvidersConfig {
+  // Backend is openrouter or local.
+  string backend = 1;
+  // Clone is off, pitch or cartesia.
+  string clone = 2;
+  OpenRouterConfig openrouter = 3;
+  LocalConfig local = 4;
+  CartesiaConfig cartesia = 5;
+}
+
+// OpenRouterConfig tunes the hosted backend.
+message OpenRouterConfig {
+  string base_url = 1;
+  string stt_model = 2;
+  string mt_model = 3;
+  double mt_temperature = 4;
+  string tts_model = 5;
+  double eur_per_usd = 6;
+  double timeout_seconds = 7;
+  // KeySet reports whether an API key is configured (read-only).
+  bool key_set = 8;
+}
+
+// LocalConfig tunes the on-machine OpenAI-compatible backend. Stage URLs
+// left empty fall back to base_url.
+message LocalConfig {
+  string base_url = 1;
+  string stt_base_url = 2;
+  string stt_model = 3;
+  string mt_base_url = 4;
+  string mt_model = 5;
+  double mt_temperature = 6;
+  string tts_base_url = 7;
+  string tts_model = 8;
+  string tts_voice = 9;
+  double timeout_seconds = 10;
+}
+
+// CartesiaConfig tunes the cloud timbre-cloning voice provider.
+message CartesiaConfig {
+  string base_url = 1;
+  string model = 2;
+  double timeout_seconds = 3;
+  // KeySet reports whether an API key is configured (read-only).
+  bool key_set = 4;
+}
+
+// DefaultsConfig seeds new sessions.
+message DefaultsConfig {
+  repeated string langs = 1;
+  // Subs is off, vtt or burn.
+  string subs = 2;
+  string bed = 3;
+  double delay_seconds = 4;
+}
+
+// BudgetsConfig caps provider spend.
+message BudgetsConfig {
+  double per_session_eur_h = 1;
+  bool hard_stop = 2;
+}
+
+// PrivacyConfig controls local retention.
+message PrivacyConfig {
+  double store_transcripts_hours = 1;
+  bool store_audio = 2;
+}

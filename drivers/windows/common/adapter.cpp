@@ -1,0 +1,111 @@
+// Prukka virtual audio — adapter: DriverEntry, device start, subdevice
+// registration and the physical connections binding wave to topology.
+
+#include "common.h"
+
+PrukkaRing g_Ring;
+
+extern "C" DRIVER_INITIALIZE DriverEntry;
+
+static NTSTATUS InstallSubdevice(PDEVICE_OBJECT device, PIRP irp, PWSTR name,
+				 REFGUID portClass,
+				 NTSTATUS (*factory)(PUNKNOWN*),
+				 PRESOURCELIST resources, PUNKNOWN* outPort)
+{
+	PPORT port = nullptr;
+	NTSTATUS status = PcNewPort(&port, portClass);
+
+	if (!NT_SUCCESS(status)) {
+		return status;
+	}
+
+	PUNKNOWN miniport = nullptr;
+	status = factory(&miniport);
+
+	if (NT_SUCCESS(status)) {
+		status = port->Init(device, irp, miniport, nullptr, resources);
+	}
+
+	if (NT_SUCCESS(status)) {
+		status = PcRegisterSubdevice(device, name, port);
+	}
+
+	if (miniport != nullptr) {
+		miniport->Release();
+	}
+
+	if (NT_SUCCESS(status) && outPort != nullptr) {
+		*outPort = port;
+
+		return status;
+	}
+
+	port->Release();
+
+	return status;
+}
+
+static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp,
+			    PRESOURCELIST resources)
+{
+	PAGED_CODE();
+
+	KeInitializeSpinLock(&g_Ring.lock);
+	g_Ring.written = 0;
+	g_Ring.read = 0;
+
+	PUNKNOWN wave = nullptr;
+	NTSTATUS status = InstallSubdevice(device, irp, const_cast<PWSTR>(L"Wave"),
+					   CLSID_PortWaveCyclic,
+					   CreateMiniportWaveCyclic, resources,
+					   &wave);
+
+	if (!NT_SUCCESS(status)) {
+		return status;
+	}
+
+	PUNKNOWN topology = nullptr;
+	status = InstallSubdevice(device, irp, const_cast<PWSTR>(L"Topology"),
+				  CLSID_PortTopology, CreateMiniportTopology,
+				  resources, &topology);
+
+	if (NT_SUCCESS(status)) {
+		// Render: wave bridge out → topology in; capture: topology
+		// out → wave bridge in. These wires are what makes audiodg
+		// build the two endpoints.
+		status = PcRegisterPhysicalConnection(device, wave,
+						      kWavePinRenderBridge,
+						      topology,
+						      kTopoPinRenderIn);
+
+		if (NT_SUCCESS(status)) {
+			status = PcRegisterPhysicalConnection(
+				device, topology, kTopoPinCaptureOut, wave,
+				kWavePinCaptureBridge);
+		}
+	}
+
+	if (topology != nullptr) {
+		topology->Release();
+	}
+
+	wave->Release();
+
+	return status;
+}
+
+static NTSTATUS AddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT physical)
+{
+	PAGED_CODE();
+
+	return PcAddAdapterDevice(driver, physical, StartDevice, 2, 0);
+}
+
+extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver,
+				PUNICODE_STRING registryPath)
+{
+	NTSTATUS status = PcInitializeAdapterDriver(driver, registryPath,
+						    AddDevice);
+
+	return status;
+}

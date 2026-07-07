@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Prukka virtual audio (PortCls). The WDK arrives as a NuGet
+     PackageReference: `msbuild -t:restore` pulls Microsoft.Windows.WDK.x64
+     (and the SDK it depends on), whose build targets provide the
+     WindowsKernelModeDriver10.0 platform toolset. A plain `msbuild` then
+     compiles ../common against it. A WDK-provisioned runner is required. -->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{546DFCFE-29C4-4A56-A94D-D877101FDC10}</ProjectGuid>
+    <TargetVersion>Windows10</TargetVersion>
+    <DriverType>KMDF</DriverType>
+    <ConfigurationType>Driver</ConfigurationType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <TargetName>prukka_audio</TargetName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.WDK.x64" Version="10.0.26100.2454" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)..\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WarningLevel>Level4</WarningLevel>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\common\adapter.cpp" />
+    <ClCompile Include="..\common\wave.cpp" />
+    <ClCompile Include="..\common\topology.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <FilesToPackage Include="prukka_speaker.inf" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

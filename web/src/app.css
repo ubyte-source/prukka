@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+/* Design tokens (Tailwind 4 theme). One palette, dark-first with an
+   automatic light variant; every component uses these semantic names so
+   the look stays coherent across the app. */
+@theme {
+  --color-brand: #4f8cff;
+  --color-brand-dim: #2f6ae0;
+
+  --color-surface: #0e1116;
+  --color-panel: #161b23;
+  --color-panel-2: #1d242e;
+  --color-line: #29313d;
+  --color-ink: #e8edf4;
+  --color-ink-dim: #96a1b0;
+
+  --color-ok: #3ecf8e;
+  --color-warn: #f0b429;
+  --color-danger: #ef5f5f;
+
+  --font-sans: "Inter", "SF Pro Text", system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas,
+    monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-surface: #f4f6f9;
+    --color-panel: #ffffff;
+    --color-panel-2: #eef1f6;
+    --color-line: #d9dfe8;
+    --color-ink: #1a2029;
+    --color-ink-dim: #5b6675;
+  }
+}
+
+body {
+  @apply bg-surface text-ink font-sans antialiased;
+}

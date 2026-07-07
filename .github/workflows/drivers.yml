@@ -1,0 +1,64 @@
+# Native drivers CI: every Prukka virtual device compiles on its own OS
+# with the platform's native toolchain alone — Command Line Tools clang on
+# macOS (plus the contract harness), the kernel's kbuild on Linux, MSVC on
+# Windows. No third-party build tools.
+name: drivers
+
+on:
+  push:
+    paths: ["drivers/**", ".github/workflows/drivers.yml"]
+  pull_request:
+    paths: ["drivers/**", ".github/workflows/drivers.yml"]
+
+jobs:
+  macos:
+    name: macOS (HAL audio ×2 + camera extension)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Microphone (build + contract harness)
+        run: drivers/macos/microphone/build.sh
+      - name: Speaker (build + contract harness)
+        run: drivers/macos/audio/build.sh
+      - name: Webcam (build + bundle gate)
+        run: drivers/macos/webcam/build.sh
+
+  linux:
+    name: Linux (ALSA loopback ×2 + V4L2 webcam)
+    # Pinned: the modules target this runner's kernel headers (6.8).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Kernel headers
+        run: sudo apt-get update && sudo apt-get install -y "linux-headers-$(uname -r)"
+      - name: Microphone module
+        run: make -C drivers/linux/microphone
+      - name: Speaker module
+        run: make -C drivers/linux/audio
+      - name: Webcam module
+        run: make -C drivers/linux/webcam
+
+  windows:
+    name: Windows (MF camera + PortCls audio ×2)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Webcam (MSVC, user mode — no WDK)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          drivers\windows\webcam\build.cmd
+      # The PortCls audio pair is kernel-mode: the WindowsKernelModeDriver10.0
+      # toolset comes from the Microsoft.Windows.WDK.x64 NuGet package the
+      # project references, so `restore` provides the toolchain and `build`
+      # compiles against it. This needs a runner whose Visual Studio carries
+      # the WDK MSBuild integration; loading the built driver additionally
+      # requires attestation signing (see drivers/windows/README.md).
+      - name: Microphone + Speaker (msbuild restore + build)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          for %%p in (microphone\prukka_mic audio\prukka_speaker) do (
+            msbuild drivers\windows\%%p.vcxproj -t:restore -p:Configuration=Release -p:Platform=x64 || exit /b 1
+            msbuild drivers\windows\%%p.vcxproj -p:Configuration=Release -p:Platform=x64 || exit /b 1
+          )

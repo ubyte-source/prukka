@@ -1,0 +1,247 @@
+# golangci-lint
+# Tested configuration that shows ALL problems
+
+version: "2"
+
+run:
+  timeout: 30m
+  tests: true
+  go: "1.26"
+
+linters:
+  default: none
+  disable: []
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - revive
+    - gosec
+    - gocyclo
+    - gocognit
+    - cyclop
+    - funlen
+    - nestif
+    - lll
+    - dupl
+    - goconst
+    - thelper
+    - gocritic
+    - misspell
+    - durationcheck
+    - nilerr
+    - errorlint
+    - bodyclose
+    - prealloc
+    - forbidigo
+    - gomoddirectives
+    - gomodguard_v2
+    - nolintlint
+    - copyloopvar
+    - intrange
+    - unconvert
+    - unparam
+    - wastedassign
+    - exhaustive
+    - noctx
+    - perfsprint
+    - usestdlibvars
+    - sloglint
+    - protogetter
+    - makezero
+    - predeclared
+    - reassign
+    - errname
+    - nilnil
+    - nilnesserr
+    - asasalint
+    - bidichk
+    - errchkjson
+    - gocheckcompilerdirectives
+    - goprintffuncname
+    - interfacebloat
+    - loggercheck
+    - musttag
+    - promlinter
+    - mirror
+    - exptostd
+    - dogsled
+    - embeddedstructfieldcheck
+    - iface
+    - recvcheck
+    - fatcontext
+    - inamedparam
+    - usetesting
+    - testableexamples
+    - gochecknoinits
+    - nosprintfhostport
+    - tparallel
+  exclusions:
+    presets: []
+    generated: lax
+    rules:
+      - path: _test\.go
+        linters:
+          - goconst
+      # Maintainer decision: internal/media/ffmpeg is the reviewed package
+      # allowed to exec ffmpeg with computed arguments and to install its
+      # executable (the self-installing dependency).
+      - path: ^internal/media/ffmpeg/
+        linters:
+          - gosec
+        text: "G204|G302|G306"
+      # Maintainer decision: convert()'s channel count comes from the WASAPI
+      # mix format, whose only caller is build-tagged windows — on the other
+      # lint platforms unparam sees just the test's constant and misfires.
+      - path: ^internal/media/wasapi/convert\.go
+        linters:
+          - unparam
+      # yaml.Marshaler fixes MarshalYAML's (any, error) shape; the error
+      # result staying nil is the interface's contract, not dead code.
+      - text: "MarshalYAML"
+        linters:
+          - unparam
+  settings:
+    # ERRCHECK - check ALL errors
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    # GOSEC - maximum security
+    gosec:
+      severity: low
+      confidence: low
+
+    # GOVET - all checks
+    govet:
+      enable-all: true
+
+    # STATICCHECK
+    staticcheck:
+      checks: ["all"]
+
+    # REVIVE - working configuration
+    revive:
+      severity: warning
+      rules:
+        - name: exported
+          severity: warning
+        - name: var-naming
+          severity: warning
+        - name: package-comments
+          severity: warning
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: range
+        - name: receiver-naming
+        - name: indent-error-flow
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: bool-literal-in-expr
+        - name: constant-logical-expr
+
+    # GOCYCLO - reasonable complexity threshold
+    gocyclo:
+      min-complexity: 15
+
+    # GOCOGNIT - cognitive complexity
+    gocognit:
+      min-complexity: 20
+
+    # FUNLEN - reasonable function length
+    funlen:
+      lines: 65
+      statements: 40
+
+    # GOCONST - find constants
+    goconst:
+      min-len: 2
+      min-occurrences: 4
+
+    # RECVCHECK - yaml.Unmarshaler forces a pointer receiver next to the
+    # value receivers the rest of the type wants; that pairing is the
+    # library's contract, not an inconsistency.
+    recvcheck:
+      exclusions:
+        - "*.MarshalYAML"
+        - "*.UnmarshalYAML"
+
+    # USETESTING - os.MkdirTemp stays allowed: UNIX socket paths must fit
+    # sun_path (104 bytes on macOS) and t.TempDir() nests too deep.
+    usetesting:
+      os-mkdir-temp: false
+
+    # GOCRITIC - enable all checks
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - experimental
+        - opinionated
+
+    lll:
+      line-length: 120
+
+    misspell:
+      locale: US
+
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: true
+
+    dupl:
+      threshold: 150
+
+    # EXHAUSTIVE - an explicit default arm is a decision: switches over
+    # foreign enums (e.g. the 14-command Windows SCM set) document what
+    # they refuse instead of naming every irrelevant value.
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    # NOLINTLINT
+    nolintlint:
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
+
+    # UNPARAM
+    unparam:
+      check-exported: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/
+
+issues:
+  # No limits
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  formats:
+    text: {}
+  sort-order:
+    - linter
+    - file
+  show-stats: true

@@ -1,0 +1,101 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus scraping the Prukka daemon /metrics endpoint.",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "title": "End-to-end latency (p50/p95)",
+      "type": "timeseries",
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(prukka_e2e_latency_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{kind}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(prukka_e2e_latency_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{kind}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "title": "Stage latency p95",
+      "type": "timeseries",
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(prukka_stage_latency_seconds_bucket[5m])))",
+          "legendFormat": "{{stage}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Cost rate (€/h)",
+      "type": "timeseries",
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "currencyEUR" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (session) (rate(prukka_cost_eur_total[5m]) * 3600)",
+          "legendFormat": "{{session}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Active sessions",
+      "type": "stat",
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "targets": [{ "expr": "prukka_sessions_active", "refId": "A" }]
+    },
+    {
+      "title": "Provider errors",
+      "type": "timeseries",
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (provider, code) (rate(prukka_provider_errors_total[5m]))",
+          "legendFormat": "{{provider}} {{code}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Fallback active / A/V drift",
+      "type": "timeseries",
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "prukka_fallback_active", "legendFormat": "fallback", "refId": "A" },
+        { "expr": "rate(prukka_provider_errors_total[5m])", "legendFormat": "provider errors/s", "refId": "B" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["prukka"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Prukka",
+  "uid": "prukka-main",
+  "version": 1
+}
