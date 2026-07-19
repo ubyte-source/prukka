@@ -1,0 +1,254 @@
+# Publishing pipeline for the all-local speech engine. Manually dispatched with
+# a published prukka release tag; builds per-architecture RUNTIME archives
+# (compiled native tools plus their bundled license texts, no models — the
+# single prukka daemon is the orchestrator), architecture-independent MODEL PACK
+# archives, and the validated prukka-engine-catalog.json, then attaches them to
+# that same prukka release so the daemon downloads its runtime from its own
+# release. There is no separate engine release.
+#
+# The build downloads directly from upstream. Git sources are commit-pinned and
+# downloaded artifacts are checksum-verified through engine/pins.sh; the
+# build-time Python wheels remain a supply-chain gap. Linux and Windows runtimes
+# remain future work once engine/build.sh has their library and archive
+# branches, so out-of-box speech is macOS-only today.
+name: build-engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published prukka release tag to attach the engine assets to (e.g. 0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+
+concurrency:
+  group: build-engine
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    name: runtime (${{ matrix.os }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15-intel, os: darwin, arch: amd64 }
+          - { runner: macos-15, os: darwin, arch: arm64 }
+          - { runner: ubuntu-24.04, os: linux, arch: amd64 }
+          - { runner: windows-latest, os: windows, arch: amd64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install the Linux build toolchain
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake patchelf libopenblas-dev unzip
+      - name: Set up the MSVC toolchain (Windows)
+        if: matrix.os == 'windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - name: Install Ninja and OpenBLAS (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          choco install ninja --no-progress -y
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg" install openblas:x64-windows
+      - name: Require the declared build host
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "$ARCH" in
+            amd64) test "$(uname -m)" = x86_64 ;;
+            arm64) test "$(uname -m)" = arm64 ;;
+            *) echo "unknown architecture $ARCH" >&2; exit 1 ;;
+          esac
+      - name: Test the engine protocol and DSP helpers
+        run: go test -race ./internal/engine/...
+      - name: Build the runtime bundle (no models)
+        run: engine/build.sh --runtime-only "$RUNNER_TEMP/runtime"
+      - name: Render ENGINE-NOTICE.txt into the bundle root
+        run: engine/notice.sh "$RUNNER_TEMP/runtime"
+      - name: Archive with the bundle contents at the member root
+        env:
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # deterministic-tar names members after the paths passed relative to
+          # -root, so the archive is rooted at the bundle itself and each
+          # top-level entry is listed: the daemon extracts expecting the tools,
+          # lib/, ... at the archive root, never nested under runtime/.
+          exe=""
+          [ "$OS" = windows ] && exe=".exe"
+          entries=()
+          for path in "$RUNNER_TEMP"/runtime/*; do
+            entries+=("$(basename "$path")")
+          done
+          archive="$RUNNER_TEMP/prukka-engine-runtime_${OS}_${ARCH}.tar.gz"
+          go run ./hack/cmd/deterministic-tar \
+            -root "$RUNNER_TEMP/runtime" -output "$archive" "${entries[@]}"
+          # git-bash's GNU tar reads "D:\..." as a remote host, so give it the
+          # POSIX form of the archive path on Windows.
+          archive_read="$archive"
+          [ "$OS" = windows ] && archive_read="$(cygpath -u "$archive")"
+          listing=$(tar -tzf "$archive_read")
+          grep -qx "whisper-server$exe" <<< "$listing"
+          grep -qx "mt$exe" <<< "$listing"
+          grep -qx "piper/piper$exe" <<< "$listing"
+          grep -qx ENGINE-NOTICE.txt <<< "$listing"
+          # No orchestrator binary: the single prukka daemon is the orchestrator.
+          ! grep -qx "prukka$exe" <<< "$listing"
+          ! grep -q '^runtime/' <<< "$listing"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: engine-runtime-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/prukka-engine-runtime_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+
+  packs:
+    name: model packs (architecture-independent)
+    runs-on: ubuntu-24.04
+    # Builds every language pack: 29 voices plus ~58 Marian->CTranslate2
+    # conversions, each a download-plus-convert, so the budget is well above the
+    # two-language original.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build the model packs
+        run: engine/packs.sh "$RUNNER_TEMP/packs"
+      - name: Archive each pack with models/ at the member root
+        run: |
+          set -euo pipefail
+          # Same member-root rule as the runtime archives: each pack directory
+          # is the archive root, so members start at models/... where the
+          # daemon extracts them. The .meta.json descriptors travel beside the
+          # archives for the catalog generator and are never published.
+          mkdir -p "$RUNNER_TEMP/dist"
+          for meta in "$RUNNER_TEMP"/packs/*.meta.json; do
+            id="$(basename "$meta" .meta.json)"
+            test -d "$RUNNER_TEMP/packs/$id"
+            go run ./hack/cmd/deterministic-tar \
+              -root "$RUNNER_TEMP/packs/$id" \
+              -output "$RUNNER_TEMP/dist/prukka-engine-pack_${id}.tar.gz" \
+              models
+            listing=$(tar -tzf "$RUNNER_TEMP/dist/prukka-engine-pack_${id}.tar.gz")
+            grep -qx 'models/' <<< "$listing"
+            ! grep -q 'meta\.json' <<< "$listing"
+            cp "$meta" "$RUNNER_TEMP/dist/"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: engine-packs
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    name: attach the engine assets to the prukka release
+    needs: [runtime, packs]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: engine-*
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+      - name: Validate the target release tag
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid release tag: $TAG" >&2
+            exit 1
+          }
+      - name: Generate the validated catalog and the standalone notice
+        run: |
+          set -euo pipefail
+          go run ./hack/cmd/engine-catalog \
+            -dir "$RUNNER_TEMP/assets" \
+            -base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}" \
+            -protocol 2 \
+            -output "$RUNNER_TEMP/prukka-engine-catalog.json"
+          engine/notice.sh "$RUNNER_TEMP"
+      - name: Attach the engine assets to the prukka release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The daemon release must already exist (cut by release.yml); this
+          # workflow only adds the engine runtime, packs and catalog to it and
+          # never creates or moves a tag.
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id >/dev/null || {
+            echo "prukka release $TAG does not exist — cut it before attaching engine assets" >&2
+            exit 1
+          }
+          assets=("$RUNNER_TEMP"/assets/prukka-engine-runtime_*.tar.gz)
+          assets+=("$RUNNER_TEMP"/assets/prukka-engine-pack_*.tar.gz)
+          assets+=("$RUNNER_TEMP/prukka-engine-catalog.json" "$RUNNER_TEMP/ENGINE-NOTICE.txt")
+          for file in "${assets[@]}"; do test -s "$file"; done
+          gh release upload "$TAG" --clobber "${assets[@]}"
+      - name: Verify every published engine asset against the catalog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Verify exactly the catalog's entries plus the catalog and the notice.
+          # The release also carries the daemon binaries, which are not ours to
+          # check, so this confirms presence and integrity rather than an exact
+          # asset-set match.
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf "$verify_dir"' EXIT
+          fetch() { gh release download "$TAG" --pattern "$1" --dir "$verify_dir" --clobber; }
+          for name in prukka-engine-catalog.json ENGINE-NOTICE.txt; do fetch "$name"; done
+          cmp "$RUNNER_TEMP/prukka-engine-catalog.json" "$verify_dir/prukka-engine-catalog.json"
+          cmp "$RUNNER_TEMP/ENGINE-NOTICE.txt" "$verify_dir/ENGINE-NOTICE.txt"
+          while IFS=$'\t' read -r name sha size; do
+            fetch "$name"
+            got_sha=$(sha256sum "$verify_dir/$name" | awk '{print $1}')
+            got_size=$(wc -c < "$verify_dir/$name" | tr -d ' ')
+            if [[ "$got_sha" != "$sha" || "$got_size" != "$size" ]]; then
+              echo "published asset $name does not match the catalog" >&2
+              exit 1
+            fi
+          done < <(jq -r \
+            '(.runtimes[], .packs[]) | [(.url | split("/") | last), .sha256, (.size | tostring)] | @tsv' \
+            "$RUNNER_TEMP/prukka-engine-catalog.json")

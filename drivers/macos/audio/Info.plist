@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+	<key>CFBundleIdentifier</key><string>it.ubyte.prukka.speaker</string>
+	<key>CFBundleName</key><string>Prukka Speaker</string>
+	<key>CFBundleExecutable</key><string>PrukkaSpeaker</string>
+	<key>CFBundlePackageType</key><string>BNDL</string>
+	<key>CFBundleShortVersionString</key><string>1.0</string>
+	<key>CFBundleVersion</key><string>1</string>
+	<key>CFPlugInDynamicRegisterFunction</key><string></string>
+	<key>CFPlugInDynamicRegistration</key><string>NO</string>
+	<key>CFPlugInFactories</key><dict>
+		<key>CF7CAE28-42E1-4C86-9803-6ABFAE662211</key><string>PrukkaSpeaker_Create</string>
+	</dict>
+	<key>CFPlugInTypes</key><dict>
+		<key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+		<array><string>CF7CAE28-42E1-4C86-9803-6ABFAE662211</string></array>
+	</dict>
+</dict></plist>
