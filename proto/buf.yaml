@@ -1,0 +1,44 @@
+# Buf module for the control-plane API. The vendored google/api annotation
+# protos are third-party (Apache-2.0) and excluded from our lint/breaking
+# rules; see proto/google/api/README.md.
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # The service name is fixed as prukka.v1.Control; the API name is
+    # a published contract, so it wins over buf's Service-suffix convention.
+    - SERVICE_SUFFIX
+  ignore:
+    - google
+breaking:
+  use:
+    - FILE
+  ignore:
+    - google
+  except:
+    # FILE rejects every cardinality change, including implicit-to-explicit
+    # presence, which is a generated-code change (double becomes *double) and
+    # not a wire or JSON one. DefaultsConfig.delay_seconds needs explicit
+    # presence because zero is a legal delay, so only presence separates an
+    # omitted field from an operator's chosen 0. The wire-relevant half of the
+    # rule stays enforced: hack/ci/proto-breaking-gate.sh re-runs the check
+    # under WIRE_JSON, which accepts that one transition and nothing else.
+    - FIELD_SAME_CARDINALITY
+    # This API has exactly one published release, republished in place, so the
+    # breaking baseline is this repository's own previous state — the only
+    # deletable fields are ones no released client has ever seen. FILE forbids
+    # any deletion outright; the wire-relevant protection stays enforced:
+    # hack/ci/proto-breaking-gate.sh re-runs the check under WIRE_JSON, which
+    # rejects every field deletion unless both its number and its name are
+    # reserved, and forbids removing those reservations afterwards
+    # (FIELD_NO_DELETE_UNLESS_NUMBER_RESERVED and _NAME_RESERVED,
+    # RESERVED_MESSAGE_NO_DELETE).
+    - FIELD_NO_DELETE
+    # Deleting a map field also deletes its synthetic map-entry message, which
+    # this rule would flag. A message a field still references cannot be
+    # deleted without failing compilation, and RPC_NO_DELETE keeps guarding
+    # the service surface, so only unreferenced messages are deletable.
+    - MESSAGE_NO_DELETE

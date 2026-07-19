@@ -1,0 +1,26 @@
+{
+  // Node-side program: the Playwright runner config and the e2e spec run under
+  // Node (esbuild-transpiled, never type-checked by Playwright itself), so the
+  // app tsconfig's vite/client environment is wrong for them. Kept free of
+  // "references"/"composite" and with noEmit so `npm run check` can gate these
+  // files without emitting anything into the source tree. DOM stays in lib for
+  // the code page.evaluate() ships into the browser.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "allowJs": false,
+    "checkJs": false,
+    "noEmit": true
+  },
+  "include": ["playwright.config.ts", "tests/**/*.ts"]
+}

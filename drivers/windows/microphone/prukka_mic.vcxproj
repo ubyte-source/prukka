@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Prukka virtual audio (PortCls, WDM). The WindowsKernelModeDriver10.0
+     toolset comes from the Windows Driver Kit installed alongside Visual
+     Studio; the GitHub windows-2022 runner ships it. Loading the built
+     driver requires attestation signing (see ../README.md). -->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{61C7AF47-A54E-4DCE-8102-7BA232A6C247}</ProjectGuid>
+    <TargetVersion>Windows10</TargetVersion>
+    <DriverType>WDM</DriverType>
+    <ConfigurationType>Driver</ConfigurationType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <TargetName>prukka_mic</TargetName>
+    <!-- No build-time signing: the shipped driver gets attestation-signed
+         out of band, so a throwaway test certificate adds nothing. -->
+    <SignMode>Off</SignMode>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)..\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>$(DDK_LIB_PATH)portcls.lib;$(DDK_LIB_PATH)stdunk.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\common\adapter.cpp" />
+    <ClCompile Include="..\common\wave.cpp" />
+    <ClCompile Include="..\common\topology.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <FilesToPackage Include="prukka_mic.inf" />
+    <!-- The built .sys must sit next to the INF for inf2cat to
+         resolve the CopyFiles entry when it builds the catalog. -->
+    <FilesToPackage Include="$(TargetPath)" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -1,0 +1,37 @@
+name: Release request
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable SemVer tag to release (for example 1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  request:
+    name: validate release reference
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          # The validation step below fetches and ls-remotes the origin, which
+          # needs the (contents: read) token when the repository is private.
+          # The checkout post-action removes the persisted credential.
+          persist-credentials: true
+      - name: Resolve protected tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: hack/ci/tag-request.sh "$TAG" release-request.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-request
+          path: release-request.txt
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30

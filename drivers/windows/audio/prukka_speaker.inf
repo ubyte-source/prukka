@@ -1,0 +1,80 @@
+; Prukka Speaker — virtual audio driver (PortCls). Call apps select it
+; the engine captures for interpretation (call ear).
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = MEDIA
+ClassGuid   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider    = %Prukka%
+CatalogFile = prukka_speaker.cat
+DriverVer   = 01/01/2026,1.0.0.0
+PnpLockDown = 1
+
+; 10.0...16299 floors the install at Windows 10 1709, where DIRID 13
+; (run from the Driver Store) first exists.
+[Manufacturer]
+%Prukka% = Prukka,NTamd64.10.0...16299
+
+[Prukka.NTamd64.10.0...16299]
+%Prukka.Speaker.DeviceDesc% = Prukka_Install,Root\PrukkaSpeaker
+
+[Prukka_Install.NT]
+Include   = ks.inf, wdmaudio.inf
+Needs     = KS.Registration, WDMAUDIO.Registration
+CopyFiles = Prukka.CopyFiles
+
+[Prukka.CopyFiles]
+prukka_speaker.sys
+
+; The interface registrations are what makes audiodg build the render and
+; capture endpoints from the Wave/Topology subdevices the adapter registers.
+[Prukka_Install.NT.Interfaces]
+AddInterface = %KSCATEGORY_AUDIO%,%KSNAME_Wave%,Prukka.Wave
+AddInterface = %KSCATEGORY_RENDER%,%KSNAME_Wave%,Prukka.Wave
+AddInterface = %KSCATEGORY_CAPTURE%,%KSNAME_Wave%,Prukka.Wave
+AddInterface = %KSCATEGORY_AUDIO%,%KSNAME_Topology%,Prukka.Topology
+
+[Prukka.Wave]
+AddReg = Prukka.Wave.AddReg
+
+[Prukka.Wave.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%Prukka.Speaker.DeviceDesc%
+
+[Prukka.Topology]
+AddReg = Prukka.Topology.AddReg
+
+[Prukka.Topology.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%Prukka.Speaker.DeviceDesc%
+
+[Prukka_Install.NT.Services]
+AddService = PrukkaSpeaker,0x00000002,Prukka_Service
+
+[Prukka_Service]
+DisplayName   = %Prukka.Speaker.DeviceDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\prukka_speaker.sys
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+prukka_speaker.sys = 1
+
+; DIRID 13 = run from the Driver Store: Driver Package Isolation forbids
+; copying into System32\drivers (InfVerif /w error 1322).
+[DestinationDirs]
+Prukka.CopyFiles = 13
+
+[Strings]
+Prukka                    = "Prukka"
+DiskName                  = "Prukka Speaker Installation Disk"
+Prukka.Speaker.DeviceDesc = "Prukka Speaker"
+KSNAME_Wave               = "Wave"
+KSNAME_Topology           = "Topology"
+KSCATEGORY_AUDIO          = "{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_RENDER         = "{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_CAPTURE        = "{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+Proxy.CLSID               = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
