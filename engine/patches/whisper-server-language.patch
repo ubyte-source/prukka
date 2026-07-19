@@ -1,0 +1,14 @@
+diff --git a/examples/server/server.cpp b/examples/server/server.cpp
+index 2024720..6c72ddd 100644
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -1154,7 +1154,8 @@ int main(int argc, char ** argv) {
+         {
+             std::string results = output_str(ctx, params, pcmf32s);
+             json jres = json{
+-                {"text", results}
++                {"text", results},
++                {"language", whisper_lang_str(whisper_full_lang_id(ctx))}
+             };
+             res.set_content(jres.dump(-1, ' ', false, json::error_handler_t::replace),
+                             "application/json");

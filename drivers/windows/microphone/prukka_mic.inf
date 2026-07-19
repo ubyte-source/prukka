@@ -1,0 +1,80 @@
+; Prukka Microphone — virtual audio driver (PortCls). Call apps select it
+; and hear the dub the engine plays into its speaker side.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = MEDIA
+ClassGuid   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider    = %Prukka%
+CatalogFile = prukka_mic.cat
+DriverVer   = 01/01/2026,1.0.0.0
+PnpLockDown = 1
+
+; 10.0...16299 floors the install at Windows 10 1709, where DIRID 13
+; (run from the Driver Store) first exists.
+[Manufacturer]
+%Prukka% = Prukka,NTamd64.10.0...16299
+
+[Prukka.NTamd64.10.0...16299]
+%Prukka.Mic.DeviceDesc% = Prukka_Install,Root\PrukkaMic
+
+[Prukka_Install.NT]
+Include   = ks.inf, wdmaudio.inf
+Needs     = KS.Registration, WDMAUDIO.Registration
+CopyFiles = Prukka.CopyFiles
+
+[Prukka.CopyFiles]
+prukka_mic.sys
+
+; The interface registrations are what makes audiodg build the render and
+; capture endpoints from the Wave/Topology subdevices the adapter registers.
+[Prukka_Install.NT.Interfaces]
+AddInterface = %KSCATEGORY_AUDIO%,%KSNAME_Wave%,Prukka.Wave
+AddInterface = %KSCATEGORY_RENDER%,%KSNAME_Wave%,Prukka.Wave
+AddInterface = %KSCATEGORY_CAPTURE%,%KSNAME_Wave%,Prukka.Wave
+AddInterface = %KSCATEGORY_AUDIO%,%KSNAME_Topology%,Prukka.Topology
+
+[Prukka.Wave]
+AddReg = Prukka.Wave.AddReg
+
+[Prukka.Wave.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%Prukka.Mic.DeviceDesc%
+
+[Prukka.Topology]
+AddReg = Prukka.Topology.AddReg
+
+[Prukka.Topology.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%Prukka.Mic.DeviceDesc%
+
+[Prukka_Install.NT.Services]
+AddService = PrukkaMic,0x00000002,Prukka_Service
+
+[Prukka_Service]
+DisplayName   = %Prukka.Mic.DeviceDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\prukka_mic.sys
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+prukka_mic.sys = 1
+
+; DIRID 13 = run from the Driver Store: Driver Package Isolation forbids
+; copying into System32\drivers (InfVerif /w error 1322).
+[DestinationDirs]
+Prukka.CopyFiles = 13
+
+[Strings]
+Prukka                = "Prukka"
+DiskName              = "Prukka Microphone Installation Disk"
+Prukka.Mic.DeviceDesc = "Prukka Microphone"
+KSNAME_Wave           = "Wave"
+KSNAME_Topology       = "Topology"
+KSCATEGORY_AUDIO      = "{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_RENDER     = "{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_CAPTURE    = "{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+Proxy.CLSID           = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"

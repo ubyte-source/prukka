@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+/* Palette target: WCAG AA text and 3:1 control boundaries. */
+@theme {
+  --color-brand: #79a9ff;
+  --color-brand-dim: #245bb8;
+
+  --color-surface: #0e1116;
+  --color-panel: #161b23;
+  --color-panel-2: #1d242e;
+  --color-line: #657286;
+  --color-ink: #e8edf4;
+  --color-ink-dim: #96a1b0;
+
+  --color-ok: #54dda1;
+  --color-warn: #f8c65c;
+  --color-danger: #ff8585;
+
+  --font-sans: "Inter", "SF Pro Text", system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas,
+    monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-brand: #1559b7;
+    --color-surface: #f4f6f9;
+    --color-panel: #ffffff;
+    --color-panel-2: #eef1f6;
+    --color-line: #788493;
+    --color-ink: #1a2029;
+    --color-ink-dim: #5b6675;
+    --color-ok: #117149;
+    --color-warn: #765000;
+    --color-danger: #b4232d;
+  }
+}
+
+html {
+  color-scheme: dark light;
+}
+
+body {
+  @apply min-w-80 bg-surface text-ink font-sans antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+button {
+  min-block-size: 2rem;
+  min-inline-size: 2rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
