@@ -1,0 +1,20 @@
+# Buf module for the control-plane API. The vendored google/api annotation
+# protos are third-party (Apache-2.0) and excluded from our lint/breaking
+# rules; see proto/google/api/README.md.
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # The service name is fixed as prukka.v1.Control; the API name is
+    # a published contract, so it wins over buf's Service-suffix convention.
+    - SERVICE_SUFFIX
+  ignore:
+    - google
+breaking:
+  use:
+    - FILE
+  ignore:
+    - google

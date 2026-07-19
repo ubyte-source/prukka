@@ -1,0 +1,125 @@
+# The trusted release workflow builds these archives without network publish
+# credentials, attests them, then uploads the verified set in a separate job.
+version: 2
+
+project_name: prukka
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
+
+builds:
+  - id: prukka-linux
+    main: ./cmd/prukka
+    binary: prukka
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # bundleddrivers embeds the virtual-device driver payloads that the
+    # release workflow stages into internal/devices/assets/.
+    tags:
+      - bundleddrivers
+    goos: [linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+  - id: prukka-windows
+    main: ./cmd/prukka
+    binary: prukka
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # The bundled virtual-camera payload is built for x64. Publishing an
+    # ARM64 binary with that payload would produce an unusable release.
+    tags:
+      - bundleddrivers
+    goos: [windows]
+    goarch: [amd64]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+  - id: prukka-darwin
+    main: ./cmd/prukka
+    binary: prukka
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    # The tray needs cgo/AppKit on macOS; release runs on a macOS runner.
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+    tags:
+      - bundleddrivers
+    goos: [darwin]
+    goarch: [amd64, arm64]
+    # The embedded Info.plist (__TEXT __info_plist) carries the TCC usage
+    # descriptions; without it macOS kills the daemon's microphone/camera
+    # capture instead of showing the permission prompt.
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -linkmode=external -extldflags "-Wl,-sectcreate,__TEXT,__info_plist,cmd/prukka/Info.plist"
+    hooks:
+      # Ad-hoc signing makes the binary eligible for the TCC prompt; it does
+      # not preserve a grant across rebuilt binaries. A release certificate,
+      # key-management and notarization path remain distribution prerequisites.
+      post: 'hack/ci/codesign-adhoc.sh "{{ .Path }}"'
+
+archives:
+  - id: default
+    ids: [prukka-linux, prukka-windows, prukka-darwin]
+    name_template: "prukka_{{ .Os }}_{{ .Arch }}"
+    builds_info:
+      owner: root
+      group: root
+      mode: 0755
+      mtime: "{{ .CommitDate }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - src: LICENSE
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+      - src: NOTICE.txt
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+      - src: drivers/linux/LICENSE
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+      - src: deploy/uninstall.sh
+        info:
+          owner: root
+          group: root
+          mode: 0755
+          mtime: "{{ .CommitDate }}"
+      - src: deploy/uninstall.ps1
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+
+checksum:
+  # The verified per-archive SBOM step creates the authoritative checksum
+  # manifest after all SPDX documents exist.
+  disable: true
+
+changelog:
+  use: git
+  sort: asc

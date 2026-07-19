@@ -1,0 +1,6 @@
+# Local development configuration used by `make dev`.
+daemon:
+  http: 127.0.0.1:8080
+defaults:
+  langs: [it, en]
+  subs: vtt
