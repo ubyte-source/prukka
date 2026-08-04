@@ -452,31 +452,31 @@ jobs:
       - name: Verify archived subjects
         run: (cd dist && sha256sum -c checksums.txt)
       - name: Attest build provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-checksums: dist/checksums.txt
       - name: Attest darwin amd64 SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: dist/prukka_darwin_amd64.tar.gz
           sbom-path: dist/prukka_darwin_amd64.spdx.json
       - name: Attest darwin arm64 SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: dist/prukka_darwin_arm64.tar.gz
           sbom-path: dist/prukka_darwin_arm64.spdx.json
       - name: Attest linux amd64 SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: dist/prukka_linux_amd64.tar.gz
           sbom-path: dist/prukka_linux_amd64.spdx.json
       - name: Attest linux arm64 SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: dist/prukka_linux_arm64.tar.gz
           sbom-path: dist/prukka_linux_arm64.spdx.json
       - name: Attest windows amd64 SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: dist/prukka_windows_amd64.zip
           sbom-path: dist/prukka_windows_amd64.spdx.json
