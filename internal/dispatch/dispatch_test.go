@@ -1,0 +1,389 @@
+package dispatch_test
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/ubyte-source/prukka/internal/dispatch"
+)
+
+// The zero rows are load-bearing: without the guard a zero pool constructs
+// fine and hangs later.
+func TestNewRejectsNonPositiveSizing(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		workers int
+		queue   int
+	}{
+		{name: "zero workers", workers: 0, queue: 1},
+		{name: "zero queue", workers: 1, queue: 0},
+		{name: "negative workers", workers: -1, queue: 1},
+		{name: "negative queue", workers: 1, queue: -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			defer func() {
+				recovered := recover()
+				if recovered == nil {
+					t.Fatalf("New(%d, %d) did not panic", tc.workers, tc.queue)
+				}
+				if msg, ok := recovered.(string); !ok || !strings.Contains(msg, "dispatch:") {
+					t.Fatalf("New(%d, %d) panic = %v, want the dispatch guard", tc.workers, tc.queue, recovered)
+				}
+			}()
+			dispatch.New(tc.workers, tc.queue)
+		})
+	}
+}
+
+func mustSubmit(t *testing.T, p *dispatch.Pool, fn func()) {
+	t.Helper()
+
+	if err := p.Submit(context.Background(), fn); err != nil {
+		t.Fatalf("Submit returned %v, want acceptance", err)
+	}
+}
+
+func TestSubmitRunsEveryJob(t *testing.T) {
+	t.Parallel()
+
+	p := dispatch.New(4, 16)
+	defer p.Close()
+
+	const jobs = 500
+
+	var ran atomic.Int64
+
+	var wg sync.WaitGroup
+
+	wg.Add(jobs)
+
+	for range jobs {
+		if err := p.Submit(context.Background(), func() {
+			defer wg.Done()
+
+			ran.Add(1)
+		}); err != nil {
+			t.Fatalf("Submit returned %v", err)
+		}
+	}
+
+	wg.Wait()
+
+	if ran.Load() != jobs {
+		t.Fatalf("ran %d jobs, want %d", ran.Load(), jobs)
+	}
+}
+
+func recordPeak(peak *atomic.Int64, n int64) {
+	for {
+		old := peak.Load()
+		if n <= old || peak.CompareAndSwap(old, n) {
+			return
+		}
+	}
+}
+
+// The bubble upgrades the assertion from "at most workers" to an equality:
+// synctest.Wait settles the pool, so the observed peak is exact.
+func TestConcurrencyNeverExceedsWorkers(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			workers = 3
+			jobs    = 50
+		)
+
+		p := dispatch.New(workers, 32)
+		defer p.Close()
+
+		var live, peak atomic.Int64
+
+		release := make(chan struct{})
+		submitted := make(chan error, 1)
+
+		var wg sync.WaitGroup
+
+		wg.Add(jobs)
+
+		job := func() {
+			defer wg.Done()
+			defer live.Add(-1)
+
+			recordPeak(&peak, live.Add(1))
+			<-release
+		}
+
+		// With every worker parked the queue fills and Submit blocks.
+		go func() {
+			for range jobs {
+				if err := p.Submit(context.Background(), job); err != nil {
+					submitted <- err
+
+					return
+				}
+			}
+			close(submitted)
+		}()
+
+		synctest.Wait()
+		if got := peak.Load(); got != workers {
+			t.Fatalf("concurrent jobs = %d, want exactly the %d workers", got, workers)
+		}
+
+		close(release)
+		wg.Wait()
+
+		if err := <-submitted; err != nil {
+			t.Fatalf("Submit returned %v", err)
+		}
+		if got := peak.Load(); got != workers {
+			t.Fatalf("peak concurrency ended at %d, want %d", got, workers)
+		}
+	})
+}
+
+func TestSubmitBlocksWhenQueueFullThenDrains(t *testing.T) {
+	t.Parallel()
+
+	// One worker, queue depth one.
+	p := dispatch.New(1, 1)
+	defer p.Close()
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+
+	var done atomic.Int64
+
+	if err := p.Submit(context.Background(), func() {
+		close(started)
+		<-release
+		done.Add(1)
+	}); err != nil {
+		t.Fatalf("Submit A: %v", err)
+	}
+
+	<-started
+
+	if err := p.Submit(context.Background(), func() { done.Add(1) }); err != nil {
+		t.Fatalf("Submit B: %v", err)
+	}
+
+	// Job C cannot be accepted until A frees the worker and B leaves the
+	// queue; race Submit against a short deadline to prove it blocks.
+	blocked := make(chan error, 1)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+
+		blocked <- p.Submit(ctx, func() { done.Add(1) })
+	}()
+
+	if err := <-blocked; err == nil {
+		t.Fatal("Submit C succeeded while the queue was full; expected backpressure to hold it")
+	}
+
+	close(release)
+	p.Close()
+
+	if done.Load() < 2 {
+		t.Fatalf("completed %d jobs, want at least A and B", done.Load())
+	}
+}
+
+func TestSubmitHonorsContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	p := dispatch.New(1, 1)
+	defer p.Close()
+
+	block := make(chan struct{})
+	defer close(block)
+
+	mustSubmit(t, p, func() { <-block })
+	mustSubmit(t, p, func() { <-block })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := p.Submit(ctx, func() {}); err == nil {
+		t.Fatal("Submit returned nil for a canceled context on a full queue")
+	}
+}
+
+func TestSubmitAfterCloseReturnsErrClosed(t *testing.T) {
+	t.Parallel()
+
+	p := dispatch.New(2, 4)
+	p.Close()
+
+	if err := p.Submit(context.Background(), func() {}); !errors.Is(err, dispatch.ErrClosed) {
+		t.Fatalf("Submit after Close = %v, want ErrClosed", err)
+	}
+}
+
+func TestCloseDrainsAcceptedJobs(t *testing.T) {
+	t.Parallel()
+
+	p := dispatch.New(2, 64)
+
+	const jobs = 100
+
+	var ran atomic.Int64
+
+	for range jobs {
+		if err := p.Submit(context.Background(), func() {
+			time.Sleep(100 * time.Microsecond)
+			ran.Add(1)
+		}); err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+	}
+
+	p.Close() // must not return until every accepted job has run
+
+	if ran.Load() != jobs {
+		t.Fatalf("Close drained %d jobs, want all %d", ran.Load(), jobs)
+	}
+}
+
+func TestCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	p := dispatch.New(2, 4)
+	p.Close()
+	p.Close() // second call must be a no-op, not a panic
+}
+
+func TestMetricsReportSaturationAgainstCapacity(t *testing.T) {
+	t.Parallel()
+
+	p := dispatch.New(2, 16)
+
+	const jobs = 40
+
+	var wg sync.WaitGroup
+
+	wg.Add(jobs)
+
+	for range jobs {
+		mustSubmit(t, p, wg.Done)
+	}
+
+	wg.Wait()
+	p.Close()
+
+	m := p.Metrics()
+	if m.Size != 0 || m.Capacity != 16 {
+		t.Fatalf("drained metrics = %d/%d, want 0 pending over capacity 16", m.Size, m.Capacity)
+	}
+}
+
+func TestManyProducersExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	p := dispatch.New(8, 128)
+
+	const (
+		producers   = 8
+		perProducer = 2000
+		total       = producers * perProducer
+	)
+
+	var ran atomic.Int64
+
+	var seen sync.Map
+
+	var dupes, submitErrs atomic.Int64
+
+	var wg sync.WaitGroup
+
+	wg.Add(total)
+
+	var pg sync.WaitGroup
+
+	pg.Add(producers)
+
+	for pr := range producers {
+		go func() {
+			defer pg.Done()
+
+			for i := range perProducer {
+				id := pr*perProducer + i
+				if err := p.Submit(context.Background(), func() {
+					defer wg.Done()
+
+					if _, dup := seen.LoadOrStore(id, struct{}{}); dup {
+						dupes.Add(1)
+					}
+
+					ran.Add(1)
+				}); err != nil {
+					submitErrs.Add(1)
+
+					wg.Done() // the job will not run; keep the wait balanced
+				}
+			}
+		}()
+	}
+
+	pg.Wait()
+	wg.Wait()
+	p.Close()
+
+	if submitErrs.Load() != 0 {
+		t.Fatalf("%d submits were rejected on a background context", submitErrs.Load())
+	}
+
+	if ran.Load() != total {
+		t.Fatalf("ran %d jobs, want %d", ran.Load(), total)
+	}
+
+	if dupes.Load() != 0 {
+		t.Fatalf("%d jobs ran more than once", dupes.Load())
+	}
+}
+
+func TestSubmitCloseRaceNeverStrandsJobs(t *testing.T) {
+	t.Parallel()
+
+	const rounds, submitters = 300, 8
+
+	for range rounds {
+		p := dispatch.New(2, 4)
+
+		var accepted, ran atomic.Int64
+
+		var wg sync.WaitGroup
+
+		wg.Add(submitters)
+		for range submitters {
+			go func() {
+				defer wg.Done()
+
+				if p.Submit(context.Background(), func() { ran.Add(1) }) == nil {
+					accepted.Add(1)
+				}
+			}()
+		}
+
+		p.Close()
+		wg.Wait()
+
+		if accepted.Load() != ran.Load() {
+			t.Fatalf("accepted %d jobs but ran %d: a submit racing Close was stranded", accepted.Load(), ran.Load())
+		}
+	}
+}

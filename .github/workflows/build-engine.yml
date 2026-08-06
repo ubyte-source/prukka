@@ -1,0 +1,482 @@
+# Publishing pipeline for the all-local speech engine. It builds
+# per-architecture RUNTIME archives (compiled native tools plus their bundled
+# license texts, no models — the single prukka daemon is the orchestrator),
+# architecture-independent MODEL PACK archives, and the validated
+# prukka-engine-catalog.json, then attaches them to an already published prukka
+# release so the daemon downloads its runtime from its own release. There is no
+# separate engine release.
+#
+# Trusted like release.yml, and for the same reason: these assets are native
+# code that `prukka setup` executes on every user's machine. This workflow is
+# loaded from the default branch by workflow_run — the requested tag is data,
+# never the source of workflow code — the reference is revalidated here against
+# protected main, every build job checks out the peeled commit rather than the
+# request, the archives and the catalog are attested, and publication waits on
+# the maintainer-approved `release` environment.
+#
+# The build downloads directly from upstream. Git sources are commit-pinned and
+# downloaded artifacts are checksum-verified through engine/pins.sh; the
+# build-time Python wheels remain a supply-chain gap. The runtime matrix below
+# builds and attaches darwin/amd64, darwin/arm64, linux/amd64, linux/arm64 and
+# windows/amd64 — every architecture the daemon ships — so out-of-box local
+# speech covers all published platforms.
+name: build-engine
+
+on:
+  workflow_run:
+    workflows: ["Engine build request"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+
+concurrency:
+  group: build-engine
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: verify trusted engine build request
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+      ref_oid: ${{ steps.verify.outputs.ref_oid }}
+      commit_oid: ${{ steps.verify.outputs.commit_oid }}
+      replace: ${{ steps.replace.outputs.replace }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          # The revalidation step below fetches and ls-remotes the origin,
+          # which needs the (contents: read) token when the repository is
+          # private. The checkout post-action removes the persisted credential.
+          persist-credentials: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: engine-request
+          path: request
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Revalidate tag against protected main
+        id: verify
+        run: hack/ci/tag-request-verify.sh request/engine-request.txt >> "$GITHUB_OUTPUT"
+      - name: Read the replace decision
+        id: replace
+        run: |
+          set -euo pipefail
+          replace=$(< request/engine-replace.txt)
+          [[ "$replace" == true || "$replace" == false ]] || {
+            echo "invalid replace decision" >&2
+            exit 1
+          }
+          printf 'replace=%s\n' "$replace" >> "$GITHUB_OUTPUT"
+
+  runtime:
+    name: runtime (${{ matrix.os }} ${{ matrix.arch }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15-intel, os: darwin, arch: amd64 }
+          - { runner: macos-15, os: darwin, arch: arm64 }
+          - { runner: ubuntu-24.04, os: linux, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, os: linux, arch: arm64 }
+          # Pinned to the image the warning pins in engine/build.sh were
+          # validated against (windows-latest at the time = VS 2026 cl);
+          # bumping it is a reviewed commit like any source pin.
+          - { runner: windows-2025, os: windows, arch: amd64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install the Linux build toolchain
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake patchelf libopenblas-dev unzip
+      - name: Set up the MSVC toolchain (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          # vswhere locates the installed toolchain and vcvars64 computes its
+          # environment, exported to the job for the bash build steps. This
+          # replaces the third-party msvc-dev-cmd action: one less
+          # supply-chain pin and no deprecated-Node annotation from its
+          # runtime.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the VC toolset found" }
+          $before = @{}
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          cmd /d /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >NUL 2>&1 && set" | ForEach-Object {
+            $i = $_.IndexOf('=')
+            if ($i -gt 0) {
+              $name = $_.Substring(0, $i)
+              $value = $_.Substring($i + 1)
+              if ($before[$name] -cne $value) {
+                Add-Content -Path $env:GITHUB_ENV -Value "$name=$value"
+              }
+            }
+          }
+      - name: Install Ninja and OpenBLAS (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          choco install ninja --no-progress -y
+          # Align VCPKG_ROOT with the vcpkg actually invoked, or every call
+          # prints a mismatched-root warning against the VS-bundled copy.
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg" install openblas:x64-windows
+      - name: Require the declared build host
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # Accept both spellings per arch: Linux reports aarch64, macOS arm64
+          # (build.sh normalizes the same pair), so an arm64 leg is valid on
+          # either host.
+          case "$ARCH" in
+            amd64) uname -m | grep -qxE 'x86_64|amd64' ;;
+            arm64) uname -m | grep -qxE 'arm64|aarch64' ;;
+            *) echo "unknown architecture $ARCH" >&2; exit 1 ;;
+          esac
+      - name: Test the engine protocol and DSP helpers
+        run: go test -race -count=1 ./internal/speechengine/...
+      - name: Build the runtime bundle (no models)
+        run: engine/build.sh --runtime-only "$RUNNER_TEMP/runtime"
+      - name: Render ENGINE-NOTICE.txt into the bundle root
+        run: engine/notice.sh "$RUNNER_TEMP/runtime"
+      - name: Archive with the bundle contents at the member root
+        env:
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # deterministic-tar names members after the paths passed relative to
+          # -root, so the archive is rooted at the bundle itself and each
+          # top-level entry is listed: the daemon extracts expecting the tools,
+          # lib/, ... at the archive root, never nested under runtime/.
+          exe=""
+          [ "$OS" = windows ] && exe=".exe"
+          entries=()
+          for path in "$RUNNER_TEMP"/runtime/*; do
+            entries+=("$(basename "$path")")
+          done
+          archive="$RUNNER_TEMP/prukka-engine-runtime_${OS}_${ARCH}.tar.gz"
+          go run ./hack/cmd/deterministic-tar \
+            -root "$RUNNER_TEMP/runtime" -output "$archive" "${entries[@]}"
+          # git-bash's GNU tar reads "D:\..." as a remote host, so give it the
+          # POSIX form of the archive path on Windows.
+          archive_read="$archive"
+          [ "$OS" = windows ] && archive_read="$(cygpath -u "$archive")"
+          listing=$(tar -tzf "$archive_read")
+          grep -qx "whisper-server$exe" <<< "$listing"
+          grep -qx "mt$exe" <<< "$listing"
+          grep -qx "piper/piper$exe" <<< "$listing"
+          grep -qx ENGINE-NOTICE.txt <<< "$listing"
+          # Negative assertions run as an `if`, never as `! cmd`: errexit does
+          # not apply to a negated command, so `! grep …` would pass silently.
+          # No orchestrator binary: the single prukka daemon is the orchestrator.
+          if grep -qx "prukka$exe" <<< "$listing" || grep -q '^runtime/' <<< "$listing"; then
+            echo "runtime archive carries the daemon or a runtime/ member root" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: engine-runtime-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/prukka-engine-runtime_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+
+  packs:
+    name: model packs (architecture-independent)
+    needs: prepare
+    runs-on: ubuntu-24.04
+    # Builds every language pack: 29 voices plus ~58 Marian->CTranslate2
+    # conversions, each a download-plus-convert, so the budget is well above the
+    # two-language original.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build the model packs
+        run: engine/packs.sh "$RUNNER_TEMP/packs"
+      - name: Archive each pack with models/ at the member root
+        run: |
+          set -euo pipefail
+          # Same member-root rule as the runtime archives: each pack directory
+          # is the archive root, so members start at models/... where the
+          # daemon extracts them. The .meta.json descriptors travel beside the
+          # archives for the catalog generator and are never published.
+          mkdir -p "$RUNNER_TEMP/dist"
+          for meta in "$RUNNER_TEMP"/packs/*.meta.json; do
+            id="$(basename "$meta" .meta.json)"
+            test -d "$RUNNER_TEMP/packs/$id"
+            go run ./hack/cmd/deterministic-tar \
+              -root "$RUNNER_TEMP/packs/$id" \
+              -output "$RUNNER_TEMP/dist/prukka-engine-pack_${id}.tar.gz" \
+              models
+            listing=$(tar -tzf "$RUNNER_TEMP/dist/prukka-engine-pack_${id}.tar.gz")
+            grep -qx 'models/' <<< "$listing"
+            # As above: a negated command is exempt from errexit, so assert
+            # the absence with an explicit branch.
+            if grep -q 'meta\.json' <<< "$listing"; then
+              echo "pack archive $id carries a .meta.json descriptor" >&2
+              exit 1
+            fi
+            cp "$meta" "$RUNNER_TEMP/dist/"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: engine-packs
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+
+  package:
+    name: catalog the engine assets (unprivileged)
+    needs: [prepare, runtime, packs]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_oid }}
+          fetch-depth: 0
+          # The immutable-reference step below fetches the origin, which needs
+          # the (contents: read) token when the repository is private. The
+          # checkout post-action removes the persisted credential.
+          persist-credentials: true
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: engine-*
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+      - name: Verify immutable release reference
+        env:
+          REF_OID: ${{ needs.prepare.outputs.ref_oid }}
+          COMMIT_OID: ${{ needs.prepare.outputs.commit_oid }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin refs/heads/main:refs/remotes/origin/main
+          [[ $(git rev-parse "refs/tags/$TAG") == "$REF_OID" ]]
+          [[ $(git rev-parse "refs/tags/$TAG^{commit}") == "$COMMIT_OID" ]]
+          git merge-base --is-ancestor "$COMMIT_OID" refs/remotes/origin/main
+      - name: Generate the validated catalog and the standalone notice
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go run ./hack/cmd/engine-catalog \
+            -dir "$RUNNER_TEMP/assets" \
+            -base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}" \
+            -output dist/prukka-engine-catalog.json
+          engine/notice.sh dist
+      - name: Stage exactly the publishable asset set
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP"/assets/prukka-engine-runtime_*.tar.gz dist/
+          cp "$RUNNER_TEMP"/assets/prukka-engine-pack_*.tar.gz dist/
+          # Every published platform, by name: a matrix leg that silently
+          # vanished would otherwise ship a catalog missing its runtime.
+          for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64 windows_amd64; do
+            test -s "dist/prukka-engine-runtime_$target.tar.gz"
+          done
+          # The attestation subjects and the publish-time integrity check both
+          # read this list. It stays inside the artifact and is never published:
+          # the catalog already carries a digest and size for every asset.
+          (cd dist && sha256sum \
+            prukka-engine-runtime_*.tar.gz prukka-engine-pack_*.tar.gz \
+            prukka-engine-catalog.json ENGINE-NOTICE.txt > engine-checksums.txt)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: engine-dist
+          path: dist
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+
+  attest:
+    name: attest engine assets
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: engine-dist
+          path: dist
+      - name: Verify archived subjects
+        run: (cd dist && sha256sum -c engine-checksums.txt)
+      # Provenance over every runtime archive, every model pack and the catalog
+      # itself: without it the client chain terminates in a catalog fetched over
+      # TLS, which proves transport, not authorship.
+      - name: Attest build provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: dist/engine-checksums.txt
+
+  publish:
+    name: attach the engine assets to the prukka release
+    needs: [prepare, package, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+    env:
+      # The checkout below exists only to source hack/ci/gh-retry.sh; gh is
+      # still told the repository explicitly rather than left to probe the
+      # sparse git directory.
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      # Sparse checkout of hack/ci alone, only to source the shared
+      # gh-retry.sh. From main, not the requested tag: the workflow file
+      # executing here is itself loaded from the default branch by
+      # workflow_run, and its helper must be the same vintage — a re-published
+      # old release would otherwise pair today's workflow with a tag tree that
+      # predates the helper. First step, so it cannot clean away the artifact
+      # downloaded below.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: main
+          sparse-checkout: hack/ci
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: engine-dist
+          path: dist
+      - name: Verify the staged assets against their attested subjects
+        run: (cd dist && sha256sum -c engine-checksums.txt)
+      - name: Refuse to replace assets this run did not build
+        env:
+          REPLACE: ${{ needs.prepare.outputs.replace }}
+        run: |
+          set -euo pipefail
+          # The transient 5xx that forced the upload retry below reaches these
+          # reads too; unretried, one flake reported a healthy release as
+          # missing. Both calls are pure reads, so gh_retry is safe.
+          # shellcheck source=hack/ci/gh-retry.sh
+          source hack/ci/gh-retry.sh
+          # The daemon release must already exist and be published (cut by
+          # release.yml); this endpoint does not resolve drafts. This workflow
+          # only adds engine assets to it and never creates or moves a tag.
+          # A genuinely absent release also burns the retry budget — gh cannot
+          # tell its 404 from a transient 5xx — a few minutes of backoff on
+          # the error path of a job with a 30-minute budget.
+          release_id=$(gh_retry gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id) || {
+            echo "prukka release $TAG does not exist — cut it before attaching engine assets" >&2
+            exit 1
+          }
+          # Snapshot before uploading: --clobber below makes retries inside this
+          # run idempotent, but an asset that predates the run is someone else's
+          # published artifact, and overwriting one has to be a decision a
+          # maintainer took in the request, not a side effect of a re-run.
+          # Through files, not process substitution: a gh failure inside <(…)
+          # is invisible to pipefail, and an empty snapshot would silently turn
+          # this refusal into a permit. gh_retry emits only a successful
+          # attempt's stdout, so a partial page never reaches the snapshot.
+          gh_retry gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+            --jq '.[].name' | sort > published-assets.txt
+          awk '{ print $2 }' dist/engine-checksums.txt | sort > staged-assets.txt
+          collisions=$(comm -12 published-assets.txt staged-assets.txt)
+          if [[ -n "$collisions" && "$REPLACE" != true ]]; then
+            printf 'release %s already carries these engine assets:\n%s\n' "$TAG" "$collisions" >&2
+            echo "re-request the build with replace_existing to overwrite them" >&2
+            exit 1
+          fi
+      - name: Attach the engine assets to the prukka release
+        run: |
+          set -euo pipefail
+          # shellcheck source=hack/ci/gh-retry.sh
+          source hack/ci/gh-retry.sh
+          # The checksum file is the asset list: "<digest>  <name>" per line.
+          assets=()
+          while read -r _ name; do
+            test -s "dist/$name"
+            assets+=("dist/$name")
+          done < dist/engine-checksums.txt
+          [[ ${#assets[@]} -gt 0 ]]
+          # Uploading ~100 assets in one pass occasionally trips a transient
+          # uploads.github.com 404 or a secondary rate limit, which aborts the
+          # whole batch. --clobber is idempotent (it overwrites), so gh_retry
+          # may rerun the entire upload; a later pass completes what an
+          # earlier one dropped, and the verify step below still guarantees
+          # integrity.
+          gh_retry gh release upload "$TAG" --clobber "${assets[@]}"
+      - name: Verify every published engine asset against the catalog
+        run: |
+          set -euo pipefail
+          # shellcheck source=hack/ci/gh-retry.sh
+          source hack/ci/gh-retry.sh
+          # Verify exactly the catalog's entries plus the catalog and the notice.
+          # The release also carries the daemon binaries, which are not ours to
+          # check, so this confirms presence and integrity rather than an exact
+          # asset-set match.
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf "$verify_dir"' EXIT
+          # The same transient 5xx that forced the upload retry above reaches
+          # these reads too, and a flake here fails the publish AFTER every
+          # asset is already attached. --clobber makes a retry idempotent.
+          fetch() {
+            gh_retry gh release download "$TAG" --pattern "$1" --dir "$verify_dir" --clobber
+          }
+          for name in prukka-engine-catalog.json ENGINE-NOTICE.txt; do fetch "$name"; done
+          cmp "dist/prukka-engine-catalog.json" "$verify_dir/prukka-engine-catalog.json"
+          cmp "dist/ENGINE-NOTICE.txt" "$verify_dir/ENGINE-NOTICE.txt"
+          while IFS=$'\t' read -r name sha size; do
+            fetch "$name"
+            got_sha=$(sha256sum "$verify_dir/$name" | awk '{print $1}')
+            got_size=$(wc -c < "$verify_dir/$name" | tr -d ' ')
+            if [[ "$got_sha" != "$sha" || "$got_size" != "$size" ]]; then
+              echo "published asset $name does not match the catalog" >&2
+              exit 1
+            fi
+          done < <(jq -r \
+            '(.runtimes[], .packs[]) | [(.url | split("/") | last), .sha256, (.size | tostring)] | @tsv' \
+            dist/prukka-engine-catalog.json)

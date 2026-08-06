@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+/* Design tokens. Both themes hold WCAG AA text contrast and 3:1 control
+   boundaries, recomputed from this file and from the components that draw
+   them by unit/tokens.test.mjs. The accent is one teal per scheme, never a
+   gradient (gradient text fails contrast silently). `line` is the boundary a
+   control draws; `hairline` is the structural rule between sections. */
+@theme {
+  --color-brand: #5eead4;
+  --color-brand-dim: #0f7d75;
+
+  --color-surface: #0a0c10;
+  --color-panel: #14171d;
+  --color-panel-2: #1c2027;
+  --color-line: #657286;
+  --color-hairline: #2a303a;
+  --color-ink: #eef1f6;
+  --color-ink-dim: #9aa4b1;
+
+  --color-ok: #54dda1;
+  --color-warn: #f8c65c;
+  --color-danger: #ff8585;
+
+  --font-sans: -apple-system, "SF Pro Text", Inter, system-ui, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas,
+    monospace;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px -12px rgb(0 0 0 / 0.5);
+  --shadow-pop: 0 4px 16px rgb(0 0 0 / 0.35), 0 12px 40px -8px rgb(0 0 0 / 0.5);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-brand: #0d6a63;
+    --color-brand-dim: #0f766e;
+    --color-surface: #f5f5f7;
+    --color-panel: #ffffff;
+    --color-panel-2: #eef0f4;
+    --color-line: #75808d;
+    --color-hairline: #d9dde3;
+    --color-ink: #1d1d1f;
+    --color-ink-dim: #55606d;
+    --color-ok: #117149;
+    --color-warn: #765000;
+    --color-danger: #b4232d;
+    --shadow-card: 0 1px 2px rgb(16 24 40 / 0.06), 0 8px 24px -12px rgb(16 24 40 / 0.12);
+    --shadow-pop: 0 4px 16px rgb(16 24 40 / 0.1), 0 12px 40px -8px rgb(16 24 40 / 0.18);
+  }
+}
+
+html {
+  color-scheme: dark light;
+}
+
+body {
+  @apply min-w-80 bg-surface text-ink font-sans antialiased;
+  font-feature-settings: "cv02", "cv03";
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+button {
+  min-block-size: 2rem;
+  min-inline-size: 2rem;
+}
+
+/* The one entrance, shared by the four wizard steps; the reduced-motion
+   block below turns it off with everything else. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.step-enter {
+  animation: rise-in 240ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,64 @@
+package hls
+
+import (
+	"log/slog"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/ubyte-source/prukka/internal/media/egress/vtt"
+	"github.com/ubyte-source/prukka/internal/testkit"
+)
+
+func newCue(t *testing.T) *LiveCue {
+	t.Helper()
+
+	return newLiveCue(t.TempDir(), slog.New(slog.DiscardHandler))
+}
+
+func TestStaleShowNeverOverwritesNewerCue(t *testing.T) {
+	t.Parallel()
+
+	c := newCue(t)
+	defer c.Close()
+
+	c.Schedule(&vtt.Cue{Lines: []string{"old"}, Start: 80 * time.Millisecond, End: 500 * time.Millisecond})
+	c.Schedule(&vtt.Cue{Lines: []string{"new"}, Start: 0, End: 500 * time.Millisecond})
+
+	// The stale generation's show timer removing itself is the precondition:
+	// only then has the race this test names actually happened. Both cues'
+	// hide timers (500 ms out) are still pending, so two entries remain.
+	testkit.Eventually(t, time.Second, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		return len(c.timers) == 2
+	}, "stale show timer never fired")
+
+	body, err := os.ReadFile(c.Path())
+	if err != nil || string(body) != "new" {
+		t.Fatalf("overlay = %q (%v), want the newer cue to keep the file", body, err)
+	}
+}
+
+func TestStaleHideNeverClearsNewerCue(t *testing.T) {
+	t.Parallel()
+
+	c := newCue(t)
+	defer c.Close()
+
+	c.Schedule(&vtt.Cue{Lines: []string{"old"}, Start: 0, End: 40 * time.Millisecond})
+	c.Schedule(&vtt.Cue{Lines: []string{"new"}, Start: 0, End: 800 * time.Millisecond})
+
+	testkit.Eventually(t, time.Second, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		return len(c.timers) == 1
+	}, "stale hide timer never fired")
+
+	body, err := os.ReadFile(c.Path())
+	if err != nil || string(body) != "new" {
+		t.Fatalf("overlay = %q (%v), want the newer cue untouched by the stale clear", body, err)
+	}
+}

@@ -1,0 +1,14 @@
+# LF on every checkout: golden files are compared byte-for-byte in tests,
+# so a CRLF checkout on Windows must not change what the repo ships.
+* text=auto eol=lf
+
+# Committed artifacts, marked so diffs collapse and language stats stay
+# honest. Each tree has a CI gate proving it matches its source:
+# internal/gen/ against proto/ (make gen) and internal/webui/dist/ against
+# web/ (make web).
+internal/gen/** linguist-generated=true
+internal/webui/dist/** linguist-generated=true whitespace=-trailing-space,-space-before-tab
+NOTICE.txt linguist-generated=true
+
+# Vendored Google API protos (see proto/google/api/README.md).
+proto/google/** linguist-vendored=true

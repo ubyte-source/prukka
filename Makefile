@@ -1,0 +1,287 @@
+SHELL := /bin/bash
+include tools/versions.mk
+
+TOOLS_BIN := $(CURDIR)/.tools/bin
+GOLANGCI  := $(TOOLS_BIN)/golangci-lint
+ACTIONLINT := $(TOOLS_BIN)/actionlint
+SHELLCHECK := $(TOOLS_BIN)/shellcheck
+BUF       := $(TOOLS_BIN)/buf
+
+GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+# The managed engine catalog lives on the release whose tag matches the daemon
+# version, so a from-source build must carry a real version: without it
+# `prukka setup` cannot resolve a catalog. Falls back to the newest tag, and
+# stays overridable (make build VERSION=x.y.z).
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
+# -s -w strip the symbol table and DWARF; the daemon needs neither at
+# runtime and it roughly halves the binary. -trimpath removes build-machine
+# paths from compiler metadata. PGO applies automatically after `make pgo`
+# creates a representative cmd/prukka/default.pgo (Go 1.21+).
+LDFLAGS := -s -w -X main.commit=$(GIT_COMMIT) -X main.version=$(VERSION)
+# A stable local code-signing identity keeps the macOS TCC microphone grant
+# alive across rebuilds: the daemon's designated requirement pins to the
+# signing certificate, not the per-build code hash, so a one-time consent
+# survives every rebuild. Absent the identity (CI, other machines) this
+# falls back to ad-hoc, which still builds and runs locally.
+PRUKKA_CODESIGN_IDENTITY ?= $(shell security find-identity -p codesigning 2>/dev/null | grep -q "Prukka Local Signing" && echo "Prukka Local Signing" || echo -)
+
+# macOS: embed Info.plist into the binary (__TEXT __info_plist). TCC only
+# prompts for microphone/camera access when the responsible executable
+# carries usage descriptions; without this the daemon's capture is killed
+# with SIGABRT before any permission dialog can appear.
+ifeq ($(shell uname -s),Darwin)
+LDFLAGS += -linkmode=external -extldflags "-Wl,-sectcreate,__TEXT,__info_plist,$(CURDIR)/cmd/prukka/Info.plist"
+endif
+
+export PATH := $(TOOLS_BIN):$(PATH)
+
+.PHONY: all
+all: build
+
+.PHONY: tools
+tools: tools-shellcheck ## Install the pinned developer tools into .tools/bin.
+	GOBIN=$(TOOLS_BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	GOBIN=$(TOOLS_BIN) go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+	GOBIN=$(TOOLS_BIN) go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
+	GOBIN=$(TOOLS_BIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	GOBIN=$(TOOLS_BIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+	GOBIN=$(TOOLS_BIN) go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway@$(GRPC_GATEWAY_VERSION)
+
+.PHONY: tools-shellcheck
+tools-shellcheck: ## Install the pinned, checksum-verified shell linter (not a Go tool).
+	hack/ci/install-shellcheck.sh $(SHELLCHECK_VERSION) $(CURDIR)/.tools \
+	  $(SHELLCHECK_SHA256_DARWIN_ARM64) $(SHELLCHECK_SHA256_DARWIN_AMD64) \
+	  $(SHELLCHECK_SHA256_LINUX_ARM64) $(SHELLCHECK_SHA256_LINUX_AMD64)
+
+.PHONY: tools-node
+tools-node: ## Install the pinned Node.js (build-time only, checksum-verified) into .tools/node.
+	hack/ci/install-node.sh $(NODE_VERSION) $(CURDIR)/.tools \
+	  $(NODE_SHA256_DARWIN_ARM64) $(NODE_SHA256_DARWIN_X64) \
+	  $(NODE_SHA256_LINUX_ARM64) $(NODE_SHA256_LINUX_X64)
+
+.PHONY: tools-syft
+tools-syft: ## Install the pinned, checksum-verified release SBOM generator.
+	hack/ci/install-syft.sh $(SYFT_VERSION) $(CURDIR)/.tools \
+	  $(SYFT_SHA256_DARWIN_ARM64) $(SYFT_SHA256_DARWIN_AMD64) \
+	  $(SYFT_SHA256_LINUX_ARM64) $(SYFT_SHA256_LINUX_AMD64)
+
+.PHONY: tools-goreleaser
+tools-goreleaser: ## Install the pinned, checksum-verified release packager.
+	hack/ci/install-goreleaser.sh $(GORELEASER_VERSION) $(CURDIR)/.tools \
+	  $(GORELEASER_SHA256_DARWIN_ARM64) $(GORELEASER_SHA256_DARWIN_AMD64) \
+	  $(GORELEASER_SHA256_LINUX_ARM64) $(GORELEASER_SHA256_LINUX_AMD64)
+
+NPM := PATH="$(TOOLS_BIN):$$PATH" npm
+NODE := $(TOOLS_BIN)/node
+
+.PHONY: web
+web: tools-node ## Rebuild the embedded dashboard (internal/webui/dist) from its Svelte source.
+	cd web && $(NPM) ci --no-fund --no-audit && $(NPM) run check && $(NPM) run build
+
+.PHONY: web-audit
+web-audit: tools-node ## Fail on known vulnerabilities in the locked dashboard dependency graph.
+	cd web && $(NPM) audit --audit-level=low
+
+.PHONY: licenses
+licenses: tools-node ## Regenerate the third-party notices from locked dependencies.
+	cd web && $(NPM) ci --no-fund --no-audit
+	$(NODE) --test hack/ci/third-party-notices.test.mjs
+	$(NODE) hack/ci/third-party-notices.mjs
+
+.PHONY: licenses-check
+licenses-check: tools-node ## Verify that the committed third-party notices match all release inputs.
+	cd web && $(NPM) ci --no-fund --no-audit
+	$(NODE) --test hack/ci/third-party-notices.test.mjs
+	@git ls-files --error-unmatch -- NOTICE.txt >/dev/null || { \
+	  echo "NOTICE.txt is not tracked" >&2; exit 1; }
+	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	  $(NODE) hack/ci/third-party-notices.mjs "$$tmp"; \
+	  diff -u NOTICE.txt "$$tmp"
+
+.PHONY: web-e2e
+web-e2e: web ## Rebuild, embed and run the dashboard cross-browser e2e suite.
+	$(MAKE) build
+	cd web && PATH="$(TOOLS_BIN):$$PATH" npx --no-install playwright test
+
+.PHONY: lint
+lint: lint-integrity lint-workflows lint-shell modernize-check pgo-check ## Run the blocking maintainer lint gate.
+	$(GOLANGCI) run ./...
+
+# darwin, linux and windows are the whole supported set — .goreleaser.yaml
+# ships those three and the native speech tools are published for them alone —
+# so these legs must select every file in the tree. A build-constrained file no
+# leg can pick up is code no gate compiles, lints or runs: it does not exist.
+.PHONY: lint-all
+lint-all: lint-integrity lint-workflows lint-shell modernize-check pgo-check ## Run the linter for every supported target OS.
+	GOOS=darwin $(GOLANGCI) run ./...
+	GOOS=linux $(GOLANGCI) run ./...
+	GOOS=windows $(GOLANGCI) run ./...
+
+.PHONY: modernize-check
+modernize-check: ## Require gofmt/goimports output and current Go source rewrites.
+	@diff=$$($(GOLANGCI) fmt --diff ./...) || exit $$?; \
+	  [ -z "$$diff" ] || { printf '%s\n' "$$diff"; exit 1; }
+	go fix -diff ./...
+
+.PHONY: lint-workflows
+lint-workflows: ## Validate GitHub Actions syntax, expressions and shell fragments.
+	$(ACTIONLINT)
+
+# No -s: the dialect comes from each shebang (three scripts are deliberately
+# POSIX sh) or from the `shellcheck shell=` pragma the sourced libraries carry.
+# -x follows `source`, -P SCRIPTDIR resolves those paths from the sourcing file.
+.PHONY: lint-shell
+lint-shell: ## Static-analyze every shell script (actionlint covers workflow run: blocks).
+	{ git ls-files -z '*.sh'; git ls-files -z --others --exclude-standard '*.sh'; } \
+	  | xargs -0 $(SHELLCHECK) -x -P SCRIPTDIR
+
+.PHONY: lint-integrity
+lint-integrity: ## Verify the maintainer linter config is byte-identical to its anchor.
+	shasum -a 256 -c LINTER.sha256
+
+.PHONY: fmt
+fmt: ## Format the tree with the linter's own formatters (gofmt + goimports).
+	$(GOLANGCI) fmt ./...
+
+.PHONY: gen
+gen: ## Regenerate protobuf/gRPC/gateway code from proto/.
+	cd proto && $(BUF) generate
+
+.PHONY: gen-check
+gen-check: gen ## Verify the committed generated code still matches proto/.
+	@changes=$$(git status --porcelain=v1 --untracked-files=all -- internal/gen/); \
+	  [ -z "$$changes" ] || { printf '%s\n' "$$changes" >&2; exit 1; }
+
+.PHONY: mod-check
+mod-check: ## Verify the module graph: dependency sources intact, go.mod/go.sum tidy.
+	go mod verify
+	go mod tidy -diff
+
+.PHONY: proto-breaking
+proto-breaking: ## Check prukka.v1 compatibility against the appropriate prior release.
+	hack/ci/proto-breaking-gate-test.sh
+	hack/ci/proto-breaking-gate.sh
+
+.PHONY: pgo-check
+pgo-check: ## Verify any committed PGO profile against its source and provenance.
+	hack/ci/pgo-profile-gate.sh
+
+.PHONY: build
+build: pgo-check ## Build the prukka binary into bin/ (stripped, trimmed, PGO if present).
+	go build ./...
+	go build -trimpath -ldflags '$(LDFLAGS)' -o bin/prukka ./cmd/prukka
+ifeq ($(shell uname -s),Darwin)
+	codesign --force --sign "$(PRUKKA_CODESIGN_IDENTITY)" bin/prukka
+	codesign --verify --strict bin/prukka
+	$(MAKE) miccapture
+endif
+
+.PHONY: test
+test: ## Run all tests with the race detector (and the test-mapping gate).
+	hack/ci/test-mapping-gate.sh
+	go test -race -count=1 ./...
+
+# Not the whole of CI: govulncheck needs a network install, the six-target
+# cross-build matrix repeats lint-all's per-GOOS typecheck, and buf lint, the
+# demos and the web set have their own targets. CONTRIBUTING.md's checklist
+# enumerates what CI adds on top of this.
+.PHONY: verify
+verify: mod-check lint-all suppression-check core-boundary tooling-boundary comment-check literal-check test bench cover-gate loadgen-test bundled-check gen-check proto-breaking licenses-check web-audit ## Run the local blocking gate set: every check CI blocks on except the browser e2e, which needs the Playwright engines.
+
+.PHONY: suppression-check
+suppression-check: ## Verify every lint suppression against the allowlist.
+	hack/ci/suppression-gate.sh
+
+.PHONY: core-boundary
+core-boundary: ## Verify internal/core depends on nothing outside the ports-and-adapters boundary.
+	hack/ci/core-boundary-gate.sh
+
+.PHONY: tooling-boundary
+tooling-boundary: ## Verify hack/ stays package main and no shipped package imports it.
+	hack/ci/tooling-boundary-gate.sh
+
+.PHONY: comment-check
+comment-check: ## Verify every doc comment sits on the declaration it names, no separators, every hack/ type documented.
+	hack/ci/comment-gate.sh
+
+.PHONY: literal-check
+literal-check: ## Verify every keyed struct literal is on one line or one field per line.
+	hack/ci/literal-gate.sh
+
+.PHONY: bundled-check
+bundled-check: ## Build, lint and test the shipped bundleddrivers configuration.
+	hack/ci/bundled-gate.sh
+
+.PHONY: bench
+bench: ## Run the hot-path benchmarks with the zero-alloc gate.
+	hack/ci/bench-gate.sh
+
+.PHONY: cover-gate
+cover-gate: ## Enforce statement-coverage floors for critical portable packages.
+	hack/ci/coverage-gate.sh
+
+.PHONY: loadgen-test
+loadgen-test: ## Test runtime cleanup, load configuration, deadlines and per-lane probes.
+	hack/ci/demo-ffmpeg-path-gate.sh
+	hack/ci/loadgen-gate-test.sh
+
+.PHONY: load
+load: build loadgen-test ## Verify 10 simultaneous it→en sessions (needs a local speech engine + ffmpeg).
+	hack/loadgen.sh
+
+.PHONY: pgo
+pgo: build ## Refresh cmd/prukka/default.pgo under real local-engine load (needs ffmpeg).
+	hack/pgo.sh
+	$(MAKE) build
+
+.PHONY: webcam
+webcam: ## Build the native macOS virtual webcam (no Xcode needed; see drivers/macos/webcam/README.md).
+	drivers/macos/webcam/build.sh
+
+.PHONY: mic
+mic: ## Build the native macOS virtual microphone (contract-harness gated; see drivers/macos/microphone/README.md).
+	drivers/macos/microphone/build.sh
+
+.PHONY: speaker
+speaker: ## Build the native macOS virtual speaker (contract-harness gated; see drivers/macos/audio/README.md).
+	drivers/macos/audio/build.sh
+
+.PHONY: miccapture
+miccapture: ## Build and sign the native macOS microphone-capture helper into bin/ (see drivers/macos/capture/README.md).
+	PRUKKA_CODESIGN_IDENTITY="$(PRUKKA_CODESIGN_IDENTITY)" drivers/macos/capture/build.sh $(CURDIR)/bin
+
+.PHONY: drivers
+drivers: webcam mic speaker ## Build every native driver this host can (the full per-OS matrix runs in CI).
+
+.PHONY: cover
+cover: ## Report statement coverage for the daemon (single binary).
+	go test -race -coverprofile=coverage.out $$(go list ./... | grep -v '/internal/gen/prukka/v1$$')
+	go tool cover -func=coverage.out | tail -1
+
+.PHONY: dev
+dev: build ## Run the daemon in the foreground with a local dev config.
+	./bin/prukka up --config hack/dev/config.yaml
+
+.PHONY: demo-control
+demo-control: build ## Run the control-plane demo, end to end.
+	hack/demo-control.sh
+
+.PHONY: demo-captions
+demo-captions: build ## Run the live-caption demo (needs a local speech engine).
+	hack/demo-captions.sh
+
+.PHONY: demo-dubbing
+demo-dubbing: build ## Run the live-dubbing demo (needs a local engine + ffmpeg).
+	hack/demo-dubbing.sh
+
+.PHONY: demo-video
+demo-video: build ## Run the video HLS demo (needs a local engine + ffmpeg).
+	hack/demo-video.sh
+
+.PHONY: clean
+clean: ## Remove build outputs (keeps installed tools).
+	rm -rf bin dist coverage.out
+
+.PHONY: help
+help: ## Show this help.
+	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "} {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'

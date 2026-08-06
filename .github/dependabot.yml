@@ -1,0 +1,22 @@
+# Dependabot version updates: Go modules, the dashboard's npm packages and
+# the SHA-pinned GitHub Actions, each on a weekly cadence. Security updates
+# are always on regardless of this schedule.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
