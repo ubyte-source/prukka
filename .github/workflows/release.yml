@@ -41,7 +41,7 @@ jobs:
           # which needs the (contents: read) token when the repository is
           # private. The checkout post-action removes the persisted credential.
           persist-credentials: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: release-request
           path: request
@@ -339,11 +339,11 @@ jobs:
         run: make tools-goreleaser
       - name: Install checksum-verified Syft
         run: make tools-syft
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: drivers-darwin
           path: internal/devices/assets/darwin
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: drivers-windows
           path: internal/devices/assets/windows
@@ -445,7 +445,7 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: release-dist
           path: dist
@@ -507,7 +507,7 @@ jobs:
           ref: main
           sparse-checkout: hack/ci
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: release-dist
           path: dist
