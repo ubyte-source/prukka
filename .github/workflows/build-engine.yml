@@ -202,7 +202,7 @@ jobs:
             echo "runtime archive carries the daemon or a runtime/ member root" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: engine-runtime-${{ matrix.os }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/prukka-engine-runtime_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
@@ -254,7 +254,7 @@ jobs:
             fi
             cp "$meta" "$RUNNER_TEMP/dist/"
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: engine-packs
           path: ${{ runner.temp }}/dist
@@ -322,7 +322,7 @@ jobs:
           (cd dist && sha256sum \
             prukka-engine-runtime_*.tar.gz prukka-engine-pack_*.tar.gz \
             prukka-engine-catalog.json ENGINE-NOTICE.txt > engine-checksums.txt)
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: engine-dist
           path: dist

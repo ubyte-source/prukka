@@ -221,7 +221,7 @@ jobs:
           go run ./hack/cmd/deterministic-tar -root drivers/macos/microphone/build -output payload/microphone.tar.gz PrukkaMic.driver
           go run ./hack/cmd/deterministic-tar -root drivers/macos/audio/build -output payload/speaker.tar.gz PrukkaSpeaker.driver
           go run ./hack/cmd/deterministic-tar -root drivers/macos/webcam/build -output payload/webcam.tar.gz "Prukka Camera.app"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: drivers-darwin
           path: payload/
@@ -302,7 +302,7 @@ jobs:
           cp drivers/windows/webcam/build/PrukkaWebcam.dll payload/webcam/
           cp drivers/windows/webcam/build/PrukkaWebcamCtl.exe payload/webcam/
           go run ./hack/cmd/deterministic-tar -root payload -output payload/webcam.tar.gz webcam
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: drivers-windows
           path: payload/webcam.tar.gz
@@ -420,7 +420,7 @@ jobs:
               -o -name 'prukka_*.tar.gz' -o -name 'prukka_*.zip' \) \
               -exec basename {} \; | sort)
           (cd dist && shasum -a 256 -c checksums.txt)
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-dist
           path: |
